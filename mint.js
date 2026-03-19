@@ -8,17 +8,27 @@ const ask = (query) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     return new Promise(resolve => rl.question(query, ans => { rl.close(); resolve(ans); }));
 };
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function run() {
     console.log("--- Solana Strict Type Minter ---");
 
     const privKeyInput = await ask("🔑 Paste Private Key: ");
     const mintAddrInput = await ask("🏷️  Enter Mint Address: ");
-    const N = parseFloat(await ask("💰 Total (N): "));
-    const M = parseInt(await ask("👥 Wallets (M): "));
+    const N = parseFloat(await ask("💰 Total: "));
+    let M = parseInt(await ask("👥 Wallets: "));
+    while (M%2!=0) {
+        console.log("Number of wallets has to be an even number!");
+        let M = parseInt(await ask("👥 Wallets: "));
+    }
 
     try {
         const connection = new Connection(clusterApiUrl('devnet'), 'confirmed');
+        // private RPC endpoint
+        //const connection = new Connection("https://mainnet.helius-rpc.com/?api-key=YOUR_ACTUAL_KEY", "confirmed");
+
+        // basic mainnet (rate limit)
+        //const connection = new Connection(clusterApiUrl('mainnet-beta'), 'confirmed');
         
         let secretKey;
         try {
@@ -37,7 +47,7 @@ async function run() {
 
         // --- FIX 2: Pass programId to getMint ---
         const mintInfo = await getMint(connection, mintAddress, 'confirmed', programId);
-        
+        console.log("Digits: ", mintInfo.decimals)
         const avg = N / M;
         const wallets = [];
 
@@ -90,7 +100,7 @@ async function run() {
                     SystemProgram.transfer({
                         fromPubkey: authority.publicKey,
                         toPubkey: item.kp.publicKey,
-                        lamports: 950000, // 0.0095 SOL (950,000 lamports)
+                        lamports: 1000000, // 0.001 SOL (1,000,000 lamports)
                     }),
 
                     createMintToInstruction(
@@ -107,9 +117,22 @@ async function run() {
                 await connection.confirmTransaction(signature);
 
                 console.log(`✅ Success: Sent ${item.amount.toFixed(mintInfo.decimals)} tokens + 0.001 SOL gas to ${item.kp.publicKey.toBase58()}`);
-                await new Promise(r => setTimeout(r, 1000)); 
+                // --- DELAY ---
+                console.log("⏳ Waiting 1 second to avoid rate limits...");
+                await sleep(1500); //change to 1500 if network is clogged, normally 1000
+
             } catch (e) {
                 console.error(`❌ Error on ${item.kp.publicKey.toBase58()}:`, e.message);
+                console.log("Mint failed, probably due to network congestion. Manually mint ", item.amount.toFixed(mintInfo.decimals), "+ 0.001 SOL gas to ", item.kp.publicKey.toBase58());
+                fs.appendFile('errors.txt', `${item.amount.toFixed(mintInfo.decimals)} ${item.kp.publicKey.toBase58()}\n`, err => {
+                    if (err) {
+                        console.error("Couldn't write to error.txt");
+                    } else {
+                    console.log('Error wallet appended to errors.txt');
+                    }
+                });
+                console.log("Sleeping 1.5s");
+                await sleep(1500);
             }
         }
     } catch (err) {
