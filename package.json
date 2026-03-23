@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "mint": "node mint.js",
-    "refund": "node refund.js"
+    "multimint": "node multimint.js"
   },
   "keywords": [],
   "author": "",
