@@ -94,9 +94,10 @@ async function run() {
                 await connection.confirmTransaction(signature);
 
                 console.log(`✅ Success: Sent ${amount.toFixed(mintInfo.decimals)} tokens + 0.001 SOL gas to ${recipient.toBase58()}`);
-                // --- DELAY ---
+                // --- DELAY --- change to 1500 if network is clogged, normally 1000
                 console.log("⏳ Waiting 1 second to avoid rate limits...");
-                await sleep(1500); //change to 1500 if network is clogged, normally 1000
+                await sleep(1500);
+                //await sleep(1000);
 
             } catch (e) {
                 console.error(`❌ Error on ${recipient.toBase58()}:`, e.message);

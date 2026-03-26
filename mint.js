@@ -130,7 +130,7 @@ async function run() {
                 console.log(`✅ Success: Sent ${item.amount.toFixed(mintInfo.decimals)} tokens + 0.001 SOL gas to ${item.kp.publicKey.toBase58()}`);
                 
                 // --- DELAY --- change to 1500 if network is clogged, normally 1000
-                console.log("⏳ Waiting 1 second to avoid rate limits...");
+                console.log("⏳ Waiting 1.5 seconds to avoid rate limits...");
                 await sleep(1500);
                 //await sleep(1000);s
             } catch (e) {

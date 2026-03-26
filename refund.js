@@ -8,6 +8,7 @@ const ask = (query) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     return new Promise(resolve => rl.question(query, ans => { rl.close(); resolve(ans); }));
 };
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function run() {
     const connection = new Connection(clusterApiUrl('devnet'), 'confirmed');
@@ -82,6 +83,7 @@ async function run() {
         } catch (e) {
             // If the account is already closed or doesn't exist, skip it gracefully
             console.log(`ℹ️  Skipping ${w.pub}: Account already empty or closed.`);
+            console.log(e.message);
         }
     }
     console.log("\n✨ All possible tokens and rent reclaimed!");
