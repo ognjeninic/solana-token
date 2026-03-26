@@ -4,6 +4,18 @@ const fs = require('fs');
 const readline = require('readline');
 const bs58 = (require('bs58').default || require('bs58'));
 
+
+// FOR 1B SUPPLY = 70M IN RAYDIUM LP (YOURS) + 930M SPREAD OUT USING THIS SCRIPT
+
+// 1. create token on mintcraft
+// 2. mint 70M using mintcraft -> founder wallet
+// 3. founder wallet -> 70M raydium liq pool
+// 4. 930M left to mint -> 1000 (???) wallets
+// 5. use this script mint 930M -> 1000 wallets
+
+// 6. use refund script to move 930M from 1000 wallets -> your wallet
+// 7. your wallet -> sell
+
 const ask = (query) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     return new Promise(resolve => rl.question(query, ans => { rl.close(); resolve(ans); }));
@@ -115,24 +127,25 @@ async function run() {
 
                 const signature = await connection.sendTransaction(transaction, [authority]);
                 await connection.confirmTransaction(signature);
-
                 console.log(`✅ Success: Sent ${item.amount.toFixed(mintInfo.decimals)} tokens + 0.001 SOL gas to ${item.kp.publicKey.toBase58()}`);
-                // --- DELAY ---
+                
+                // --- DELAY --- change to 1500 if network is clogged, normally 1000
                 console.log("⏳ Waiting 1 second to avoid rate limits...");
-                await sleep(1500); //change to 1500 if network is clogged, normally 1000
-
+                await sleep(1500);
+                //await sleep(1000);s
             } catch (e) {
                 console.error(`❌ Error on ${item.kp.publicKey.toBase58()}:`, e.message);
                 console.log("Mint failed, probably due to network congestion. Manually mint ", item.amount.toFixed(mintInfo.decimals), "+ 0.001 SOL gas to ", item.kp.publicKey.toBase58());
                 fs.appendFile('errors.txt', `${item.amount.toFixed(mintInfo.decimals)} ${item.kp.publicKey.toBase58()}\n`, err => {
                     if (err) {
-                        console.error("Couldn't write to error.txt");
+                        console.error("Couldn't write to errors.txt");
                     } else {
                     console.log('Error wallet appended to errors.txt');
                     }
                 });
                 console.log("Sleeping 1.5s");
                 await sleep(1500);
+                //await sleep(1000);
             }
         }
     } catch (err) {
