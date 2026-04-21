@@ -3,10 +3,12 @@ const { Telegraf, session, Markup } = require('telegraf');
 const { loadConfig } = require('./lib/config');
 const { addAllowedUserId, loadRuntimeAllowlist, removeAllowedUserId } = require('./lib/storage/allowlistStore');
 const { backfillMintMetadata, listMintSummaries, listRuns, loadRun } = require('./lib/storage/runStore');
+const { listTokens } = require('./lib/storage/tokenStore');
 const { executeMintRun, retryMintFailures } = require('./lib/services/mintService');
 const { executeRefundRun } = require('./lib/services/refundService');
+const { executeAdditionalMint, executeRevokeAuthority, executeTokenCreate, fetchTokenAuthorityStatus } = require('./lib/services/tokenService');
 const { createConnection, fetchTokenMetadata } = require('./lib/services/solana');
-const { createProgressReporter, formatProgressBar, parsePositiveInteger, parsePositiveNumber } = require('./lib/utils');
+const { createProgressReporter, formatProgressBar, formatRawAmount, parseIntegerInRange, parsePositiveInteger, parsePositiveNumber, parseTokenAmountToRaw } = require('./lib/utils');
 
 const config = loadConfig({ requireTelegram: true });
 const bot = new Telegraf(config.telegramBotToken);
@@ -16,6 +18,7 @@ const allowlistState = {
 
 const PAGE_SIZE = 6;
 const DEFAULT_WALLET_COUNT = '10';
+const DEFAULT_TOKEN_DECIMALS = '6';
 const NETWORKS = ['devnet', 'mainnet'];
 const RETRYABLE_MINT_STATUSES = new Set(['pending', 'mint-failed', 'mint-retry-failed']);
 
@@ -40,8 +43,10 @@ function createDefaultSession() {
         mintPromptQueue: [],
         error: null,
         mintDraft: null,
+        tokenDraft: null,
         refundState: null,
-        browseState: null
+        browseState: null,
+        createdTokenState: null
     };
 }
 
@@ -90,6 +95,39 @@ function createBrowseState(mode = 'mints') {
     };
 }
 
+function createTokenDraft(overrides = {}) {
+    const requestedNetwork = overrides.network || config.defaultCluster;
+    const defaultNetwork = normalizeBotNetwork(requestedNetwork);
+    const draft = {
+        tokenName: '',
+        tokenSymbol: '',
+        decimals: DEFAULT_TOKEN_DECIMALS,
+        initialMintAmount: '',
+        network: defaultNetwork,
+        rpcOverride: getDefaultRpcForNetwork(defaultNetwork),
+        ...overrides
+    };
+
+    draft.network = normalizeBotNetwork(draft.network);
+    if (!draft.rpcOverride || draft.rpcOverride === getDefaultRpcForNetwork(requestedNetwork)) {
+        draft.rpcOverride = getDefaultRpcForNetwork(draft.network);
+    }
+
+    return draft;
+}
+
+function createCreatedTokenState() {
+    return {
+        tokens: [],
+        tokenPage: 0,
+        selectedTokenIndex: null,
+        additionalMintAmount: '',
+        runs: [],
+        runPage: 0,
+        selectedRunIndex: null
+    };
+}
+
 function isAuthorized(ctx) {
     const userId = String(ctx.from?.id || '');
     const chatId = String(ctx.chat?.id || '');
@@ -125,8 +163,10 @@ function resetSession(ctx, options = {}) {
     ctx.session.mintPromptQueue = [];
     ctx.session.error = null;
     ctx.session.mintDraft = null;
+    ctx.session.tokenDraft = null;
     ctx.session.refundState = null;
     ctx.session.browseState = null;
+    ctx.session.createdTokenState = null;
     ctx.session.panel = panel;
     ctx.session.progress = progress;
 }
@@ -150,10 +190,14 @@ function createKeyboard(rows) {
 function buildActionButtons() {
     return [
         [
+            Markup.button.callback('🛠️ Create Token', 'menu:create')
+        ],
+        [
             Markup.button.callback('🪙 Mint', 'menu:mint'),
             Markup.button.callback('↩️ Refund', 'menu:refund')
         ],
         [
+            Markup.button.callback('🧾 Created Tokens', 'menu:tokens'),
             Markup.button.callback('🗂️ Saved Mints', 'menu:mints')
         ]
     ];
@@ -305,9 +349,10 @@ function truncateText(text, maxLength = 40) {
     return `${value.slice(0, maxLength - 1)}…`;
 }
 
-function getTokenDisplay(entity = {}) {
-    const tokenSymbol = String(entity.tokenSymbol || '').trim();
-    const tokenName = String(entity.tokenName || '').trim();
+function getTokenDisplay(entity) {
+    const source = entity || {};
+    const tokenSymbol = String(source.tokenSymbol || '').trim();
+    const tokenName = String(source.tokenName || '').trim();
 
     if (tokenSymbol && tokenName) {
         return `${tokenSymbol} | ${tokenName}`;
@@ -438,6 +483,45 @@ function validateDraftField(field, value) {
     throw new Error('Unknown field.');
 }
 
+function validateTokenDraftField(field, value) {
+    const trimmed = String(value).trim();
+
+    if (field === 'tokenName') {
+        if (!trimmed) {
+            throw new Error('Token name is required.');
+        }
+
+        return trimmed;
+    }
+
+    if (field === 'tokenSymbol') {
+        if (!trimmed) {
+            throw new Error('Token symbol is required.');
+        }
+
+        return trimmed.toUpperCase();
+    }
+
+    if (field === 'decimals') {
+        return String(parseIntegerInRange(trimmed, 'Decimals', 0, 255));
+    }
+
+    if (field === 'initialMintAmount') {
+        parsePositiveNumber(trimmed, 'Initial mint amount');
+        return trimmed;
+    }
+
+    if (field === 'rpcOverride') {
+        if (!trimmed) {
+            throw new Error('Custom RPC URL cannot be empty. Use the default RPC button to reset.');
+        }
+
+        return trimmed;
+    }
+
+    throw new Error('Unknown field.');
+}
+
 function getMintDraftErrors(draft) {
     const errors = [];
 
@@ -460,6 +544,37 @@ function getMintDraftErrors(draft) {
     }
 
     if (!NETWORKS.includes(draft.network)) {
+        errors.push('Network');
+    }
+
+    return errors;
+}
+
+function getTokenDraftErrors(draft) {
+    const source = draft || createTokenDraft();
+    const errors = [];
+
+    if (!String(source.tokenName || '').trim()) {
+        errors.push('Token name');
+    }
+
+    if (!String(source.tokenSymbol || '').trim()) {
+        errors.push('Token symbol');
+    }
+
+    try {
+        parseIntegerInRange(source.decimals, 'Decimals', 0, 255);
+    } catch (error) {
+        errors.push('Decimals');
+    }
+
+    try {
+        parseTokenAmountToRaw(source.initialMintAmount, parseIntegerInRange(source.decimals, 'Decimals', 0, 255));
+    } catch (error) {
+        errors.push('Initial mint amount');
+    }
+
+    if (!NETWORKS.includes(source.network)) {
         errors.push('Network');
     }
 
@@ -507,6 +622,50 @@ function formatMintCardText(ctx) {
     return lines.join('\n');
 }
 
+function formatTokenCardText(ctx) {
+    const draft = ctx.session.tokenDraft || createTokenDraft();
+    const errors = getTokenDraftErrors(draft);
+    const tokenDisplay = getTokenDisplay(draft);
+    const lines = [
+        'Token Creation',
+        '',
+        ...(tokenDisplay ? [`Token: ${tokenDisplay}`] : []),
+        `Name: ${draft.tokenName || 'Not set'}`,
+        `Symbol: ${draft.tokenSymbol || 'Not set'}`,
+        `Decimals: ${draft.decimals || DEFAULT_TOKEN_DECIMALS}`,
+        `Initial Mint Amount: ${draft.initialMintAmount || 'Not set'}`,
+        `Network: ${getNetworkLabel(draft.network || 'devnet')}`,
+        `RPC Override: ${formatRpcOverride(draft.rpcOverride, draft.network)}`,
+        ''
+    ];
+
+    if (ctx.session.editField === 'tokenName') {
+        lines.push('Editing Token Name: send the token name as a normal message.');
+    } else if (ctx.session.editField === 'tokenSymbol') {
+        lines.push('Editing Token Symbol: send the token symbol as a normal message.');
+    } else if (ctx.session.editField === 'decimals') {
+        lines.push('Editing Decimals: send an integer between 0 and 255.');
+    } else if (ctx.session.editField === 'initialMintAmount') {
+        lines.push('Editing Initial Mint Amount: send a positive number. This will be minted into the bot wallet right after token creation.');
+    } else if (ctx.session.editField === 'rpcOverride') {
+        lines.push('Editing RPC Override: send a full custom RPC URL. Use the default RPC button to reset to the network default.');
+    } else {
+        lines.push('Tap a tile to edit a field, or create the token when the card looks correct.');
+    }
+
+    if (errors.length) {
+        lines.push('');
+        lines.push(`Missing or invalid: ${errors.join(', ')}`);
+    }
+
+    if (ctx.session.error) {
+        lines.push('');
+        lines.push(`Error: ${ctx.session.error}`);
+    }
+
+    return lines.join('\n');
+}
+
 function buildMintCardButtons(ctx) {
     const draft = ctx.session.mintDraft;
     const startReady = getMintDraftErrors(draft).length === 0;
@@ -533,6 +692,35 @@ function buildMintCardButtons(ctx) {
     ];
 }
 
+function buildTokenCardButtons(ctx) {
+    const draft = ctx.session.tokenDraft || createTokenDraft();
+    const createReady = getTokenDraftErrors(draft).length === 0;
+
+    return [
+        [
+            Markup.button.callback('🏷️ Token Name', 'token:edit:tokenName'),
+            Markup.button.callback('🔤 Token Symbol', 'token:edit:tokenSymbol')
+        ],
+        [
+            Markup.button.callback('🔢 Decimals', 'token:edit:decimals'),
+            Markup.button.callback('💸 Initial Mint', 'token:edit:initialMintAmount')
+        ],
+        [
+            Markup.button.callback(`🌐 Network: ${getNetworkLabel(draft.network)}`, 'token:network')
+        ],
+        [
+            Markup.button.callback('🔧 RPC Override', 'token:edit:rpcOverride'),
+            Markup.button.callback('♻️ Use Default RPC', 'token:rpc:default')
+        ],
+        [
+            Markup.button.callback(createReady ? '🛠️ Create Token' : '⚠️ Fix Fields First', 'token:start')
+        ],
+        [
+            Markup.button.callback('🏠 Main Menu', 'menu:main')
+        ]
+    ];
+}
+
 function formatNetworkButton(network, selectedNetwork) {
     const label = getNetworkLabel(network);
     return selectedNetwork === network ? `✅ ${label}` : `🌐 ${label}`;
@@ -552,12 +740,44 @@ function buildNetworkButtons(selectedNetwork) {
     ];
 }
 
+function buildTokenNetworkButtons(selectedNetwork) {
+    return [
+        [
+            Markup.button.callback(formatNetworkButton('mainnet', selectedNetwork), 'token:setnet:mainnet')
+        ],
+        [
+            Markup.button.callback(formatNetworkButton('devnet', selectedNetwork), 'token:setnet:devnet')
+        ],
+        [
+            Markup.button.callback('⬅️ Back to Token Card', 'token:back')
+        ]
+    ];
+}
+
 function formatNetworkPickerText(ctx) {
     const lines = [
         'Select Network',
         '',
         `Current: ${getNetworkLabel(ctx.session.mintDraft.network)}`,
         `RPC Override: ${formatRpcOverride(ctx.session.mintDraft.rpcOverride, ctx.session.mintDraft.network)}`,
+        '',
+        'Choose mainnet or devnet. Selecting a network also applies its default RPC.'
+    ];
+
+    if (ctx.session.error) {
+        lines.push('');
+        lines.push(`Error: ${ctx.session.error}`);
+    }
+
+    return lines.join('\n');
+}
+
+function formatTokenNetworkPickerText(ctx) {
+    const lines = [
+        'Select Network',
+        '',
+        `Current: ${getNetworkLabel(ctx.session.tokenDraft.network)}`,
+        `RPC Override: ${formatRpcOverride(ctx.session.tokenDraft.rpcOverride, ctx.session.tokenDraft.network)}`,
         '',
         'Choose mainnet or devnet. Selecting a network also applies its default RPC.'
     ];
@@ -682,6 +902,58 @@ function formatRunLabel(run) {
     return `🧾 ${run.runId} (${run.status})`;
 }
 
+function parseRawAmountOrZero(value) {
+    try {
+        return BigInt(String(value || '0'));
+    } catch (error) {
+        return 0n;
+    }
+}
+
+function parseDisplayAmountOrZero(value, decimals) {
+    const normalized = String(value || '').trim();
+    if (!normalized || normalized === '0' || normalized === '0.0') {
+        return 0n;
+    }
+
+    try {
+        return parseTokenAmountToRaw(normalized, decimals);
+    } catch (error) {
+        return 0n;
+    }
+}
+
+function getCreatedTokenTotals(token, runs = []) {
+    const decimals = Number.isInteger(token?.decimals) ? token.decimals : 6;
+    const botWalletRaw = token?.totalMintedToAuthority
+        ? parseDisplayAmountOrZero(token.totalMintedToAuthority, decimals)
+        : parseDisplayAmountOrZero(token?.initialMintAmount, decimals);
+
+    const temporaryWalletsRaw = runs.reduce((runTotal, run) => {
+        if (!Array.isArray(run?.wallets)) {
+            return runTotal;
+        }
+
+        const walletTotal = run.wallets.reduce((walletSum, wallet) => {
+            if (wallet?.mintedRawAmount !== undefined) {
+                return walletSum + parseRawAmountOrZero(wallet.mintedRawAmount);
+            }
+
+            return walletSum + parseDisplayAmountOrZero(wallet?.mintedAmount, decimals);
+        }, 0n);
+
+        return runTotal + walletTotal;
+    }, 0n);
+
+    const acrossAllRaw = botWalletRaw + temporaryWalletsRaw;
+
+    return {
+        botWallet: formatRawAmount(botWalletRaw, decimals),
+        temporaryWallets: formatRawAmount(temporaryWalletsRaw, decimals),
+        acrossAll: formatRawAmount(acrossAllRaw, decimals)
+    };
+}
+
 function countRetryableWallets(run) {
     return Array.isArray(run?.wallets)
         ? run.wallets.filter(wallet => RETRYABLE_MINT_STATUSES.has(wallet.status)).length
@@ -711,6 +983,61 @@ function buildRunListButtons(runs, page, selectionPrefix, pagePrefix, backCallba
         rows,
         page: safePage,
         totalPages
+    };
+}
+
+function formatCreatedTokenLabel(token) {
+    return `🧾 ${truncateText(getMintPrimaryLabel(token), 26)}`;
+}
+
+function buildCreatedTokenListButtons(tokens, page, selectionPrefix, pagePrefix, backCallback) {
+    const { items, page: safePage, totalPages } = paginate(tokens, page);
+    const rows = items.map((token, index) => [
+        Markup.button.callback(
+            formatCreatedTokenLabel(token),
+            `${selectionPrefix}:${safePage * PAGE_SIZE + index}`
+        )
+    ]);
+    const paginationRow = buildPaginationRow(pagePrefix, safePage, totalPages);
+
+    if (paginationRow.length) {
+        rows.push(paginationRow);
+    }
+
+    rows.push([
+        Markup.button.callback('⬅️ Back', backCallback),
+        Markup.button.callback('🏠 Main Menu', 'menu:main')
+    ]);
+
+    return {
+        rows,
+        page: safePage,
+        totalPages
+    };
+}
+
+function createMintSummaryFromRuns(token, runs) {
+    const latestRun = runs[0] || null;
+
+    return {
+        mintAddress: token.mintAddress,
+        tokenName: token.tokenName || '',
+        tokenSymbol: token.tokenSymbol || '',
+        runCount: runs.length,
+        latestRunAt: latestRun?.createdAt || token.createdAt,
+        latestRunId: latestRun?.runId || 'None',
+        latestStatus: latestRun?.status || 'no_runs',
+        latestNetwork: latestRun?.network || token.network,
+        latestRpcUrl: latestRun?.rpcUrl || token.rpcUrl
+    };
+}
+
+async function getCreatedTokenRunSummary(token) {
+    const runs = await listRuns(token.mintAddress);
+
+    return {
+        runs,
+        summary: createMintSummaryFromRuns(token, runs)
     };
 }
 
@@ -749,6 +1076,297 @@ async function renderMintCard(ctx) {
 async function renderNetworkPicker(ctx) {
     ctx.session.view = 'network';
     await renderPanel(ctx, formatNetworkPickerText(ctx), buildNetworkButtons(ctx.session.mintDraft.network));
+}
+
+async function startTokenCreateFlow(ctx, options = {}) {
+    resetSession(ctx);
+    ctx.session.flow = 'tokenCreate';
+    ctx.session.view = 'config';
+    ctx.session.tokenDraft = createTokenDraft(options.draftOverrides || {});
+    ctx.session.editField = options.editField || null;
+    await renderTokenCard(ctx);
+}
+
+async function renderTokenCard(ctx) {
+    ctx.session.view = 'config';
+    if (!ctx.session.tokenDraft) {
+        ctx.session.tokenDraft = createTokenDraft();
+    }
+    await renderPanel(ctx, formatTokenCardText(ctx), buildTokenCardButtons(ctx));
+}
+
+async function renderTokenNetworkPicker(ctx) {
+    ctx.session.view = 'network';
+    await renderPanel(ctx, formatTokenNetworkPickerText(ctx), buildTokenNetworkButtons(ctx.session.tokenDraft.network));
+}
+
+async function startCreatedTokensFlow(ctx, options = {}) {
+    resetSession(ctx);
+    ctx.session.flow = 'createdTokens';
+    ctx.session.view = 'tokens';
+    ctx.session.createdTokenState = createCreatedTokenState();
+    ctx.session.createdTokenState.tokens = await listTokens();
+
+    if (!ctx.session.createdTokenState.tokens.length) {
+        await renderPanel(ctx, options.introText || 'No created tokens found.', [
+            [Markup.button.callback('🏠 Main Menu', 'menu:main')]
+        ]);
+        return;
+    }
+
+    if (options.selectedMintAddress) {
+        const selectedTokenIndex = ctx.session.createdTokenState.tokens.findIndex(
+            token => token.mintAddress === options.selectedMintAddress
+        );
+
+        if (selectedTokenIndex >= 0) {
+            ctx.session.createdTokenState.selectedTokenIndex = selectedTokenIndex;
+            await renderCreatedTokenDetail(ctx, options.introText);
+            return;
+        }
+    }
+
+    await renderCreatedTokenPicker(ctx, options.introText);
+}
+
+async function renderCreatedTokenPicker(ctx, introText) {
+    const state = ctx.session.createdTokenState;
+    const { rows, page, totalPages } = buildCreatedTokenListButtons(
+        state.tokens,
+        state.tokenPage,
+        'tokens:token',
+        'tokens:page',
+        'menu:main'
+    );
+
+    state.tokenPage = page;
+    const lines = [
+        'Created Tokens',
+        '',
+        `Page ${page + 1} of ${totalPages}`,
+        introText || 'Choose a token you created to inspect it or start a new mint run.'
+    ];
+
+    if (ctx.session.error) {
+        lines.push('');
+        lines.push(`Error: ${ctx.session.error}`);
+    }
+
+    await renderPanel(ctx, lines.join('\n'), rows);
+}
+
+async function renderCreatedTokenDetail(ctx, introText) {
+    ctx.session.flow = 'createdTokens';
+    ctx.session.view = 'detail';
+    ctx.session.editField = null;
+    const state = ctx.session.createdTokenState;
+    const selectedToken = state.tokens[state.selectedTokenIndex];
+    const { runs, summary } = await getCreatedTokenRunSummary(selectedToken);
+    const totals = getCreatedTokenTotals(selectedToken, runs);
+    const tokenDisplay = getTokenDisplay(selectedToken);
+    let authorityStatus = {
+        mintAuthority: null,
+        freezeAuthority: null
+    };
+
+    try {
+        authorityStatus = await fetchTokenAuthorityStatus({
+            mintAddress: selectedToken.mintAddress,
+            connectionOptions: {
+                cluster: selectedToken.network,
+                rpcUrl: selectedToken.rpcUrl || undefined
+            }
+        });
+    } catch (error) {
+        void error;
+    }
+
+    const lines = [
+        'Created Token Details',
+        '',
+        ...(introText ? [introText, ''] : []),
+        ...(tokenDisplay ? [`Token: ${tokenDisplay}`] : []),
+        `Mint Address: ${selectedToken.mintAddress}`,
+        `Decimals: ${selectedToken.decimals}`,
+        `Mint Authority: ${authorityStatus.mintAuthority ? 'Active' : 'Revoked'}`,
+        `Freeze Authority: ${authorityStatus.freezeAuthority ? 'Active' : 'Revoked'}`,
+        `Initial Mint Amount: ${selectedToken.initialMintAmount || '0'}`,
+        `Total Minted To Bot Wallet: ${totals.botWallet}`,
+        `Total Minted To Temporary Wallets: ${totals.temporaryWallets}`,
+        `Total Minted Across All Bot Actions: ${totals.acrossAll}`,
+        `Network: ${getNetworkLabel(selectedToken.network)}`,
+        `RPC: ${selectedToken.rpcUrl || 'Automatic'}`,
+        `Bot Token Account: ${selectedToken.authorityTokenAccount || 'Unknown'}`,
+        `Created: ${selectedToken.createdAt}`,
+        `Runs: ${summary.runCount}`,
+        `Latest Run: ${summary.latestRunId}`,
+        `Latest Status: ${summary.latestStatus}`,
+        `Latest Date: ${summary.latestRunAt}`
+    ];
+
+    if (ctx.session.error) {
+        lines.push('');
+        lines.push(`Error: ${ctx.session.error}`);
+    }
+
+    state.runs = runs;
+    state.runPage = 0;
+    state.selectedRunIndex = null;
+
+    const rows = [
+        [
+            Markup.button.callback('🧾 View Runs', 'tokens:viewruns'),
+            Markup.button.callback('🪙 New Run', 'tokens:newrun')
+        ],
+        [
+            Markup.button.callback('➕ Additional Mint', 'tokens:additionalmint')
+        ]
+    ];
+
+    if (authorityStatus.mintAuthority) {
+        rows.push([
+            Markup.button.callback('🔒 Revoke Mint Authority', 'tokens:revoke:mint')
+        ]);
+    }
+
+    if (authorityStatus.freezeAuthority) {
+        rows.push([
+            Markup.button.callback('🧊 Revoke Freeze Authority', 'tokens:revoke:freeze')
+        ]);
+    }
+
+    rows.push(
+        [
+            Markup.button.callback('⬅️ Back', 'tokens:back')
+        ],
+        [
+            Markup.button.callback('🏠 Main Menu', 'menu:main')
+        ]
+    );
+
+    await renderPanel(ctx, lines.join('\n'), rows);
+}
+
+async function renderAdditionalMintCard(ctx) {
+    ctx.session.flow = 'tokenAdditionalMint';
+    ctx.session.view = 'additionalMint';
+    const state = ctx.session.createdTokenState;
+    const selectedToken = state.tokens[state.selectedTokenIndex];
+    const lines = [
+        'Additional Mint',
+        '',
+        `Token: ${getMintPrimaryLabel(selectedToken)}`,
+        `Mint Address: ${selectedToken.mintAddress}`,
+        `Decimals: ${selectedToken.decimals}`,
+        `Current Total Minted: ${selectedToken.totalMintedToAuthority || selectedToken.initialMintAmount || '0'}`,
+        `Amount: ${state.additionalMintAmount || 'Not set'}`,
+        '',
+        ctx.session.editField === 'additionalMintAmount'
+            ? 'Editing Amount: send a positive amount to mint into the bot wallet.'
+            : 'Tap amount to edit it, then start the additional mint.'
+    ];
+
+    if (ctx.session.error) {
+        lines.push('');
+        lines.push(`Error: ${ctx.session.error}`);
+    }
+
+    await renderPanel(ctx, lines.join('\n'), [
+        [
+            Markup.button.callback('💸 Amount', 'tokens:additionalmint:edit')
+        ],
+        [
+            Markup.button.callback('🚀 Start Additional Mint', 'tokens:additionalmint:start')
+        ],
+        [
+            Markup.button.callback('⬅️ Back', 'tokens:additionalmint:back')
+        ],
+        [
+            Markup.button.callback('🏠 Main Menu', 'menu:main')
+        ]
+    ]);
+}
+
+async function renderCreatedTokenRunPicker(ctx) {
+    const state = ctx.session.createdTokenState;
+    const selectedToken = state.tokens[state.selectedTokenIndex];
+    const { rows, page, totalPages } = buildRunListButtons(
+        state.runs,
+        state.runPage,
+        'tokens:runs:run',
+        'tokens:runs:page',
+        'tokens:detail'
+    );
+
+    state.runPage = page;
+    const lines = [
+        'Created Token Runs',
+        '',
+        `Token: ${getMintPrimaryLabel(selectedToken)}`,
+        `Address: ${selectedToken.mintAddress}`,
+        `Page ${page + 1} of ${totalPages}`,
+        'Choose a run to view details.'
+    ];
+
+    if (ctx.session.error) {
+        lines.push('');
+        lines.push(`Error: ${ctx.session.error}`);
+    }
+
+    rows.splice(rows.length - 1, 0, [
+        Markup.button.callback('🪙 New Run', 'tokens:newrun')
+    ]);
+
+    await renderPanel(ctx, lines.join('\n'), rows);
+}
+
+async function renderCreatedTokenRunDetail(ctx) {
+    const state = ctx.session.createdTokenState;
+    const selectedToken = state.tokens[state.selectedTokenIndex];
+    const selectedRun = state.runs[state.selectedRunIndex];
+    const retryableWalletCount = countRetryableWallets(selectedRun);
+    const lines = [
+        'Created Token Run Details',
+        '',
+        `Token: ${getMintPrimaryLabel(selectedToken)}`,
+        `Address: ${selectedToken.mintAddress}`,
+        `Run: ${selectedRun.runId}`,
+        `Status: ${selectedRun.status}`,
+        `Wallets: ${selectedRun.walletCount}`,
+        `Network: ${getNetworkLabel(selectedRun.network)}`,
+        `RPC: ${selectedRun.rpcUrl || 'Automatic'}`,
+        `Failures: ${selectedRun.failures?.length || 0}`,
+        `Created: ${selectedRun.createdAt}`
+    ];
+
+    if (ctx.session.error) {
+        lines.push('');
+        lines.push(`Error: ${ctx.session.error}`);
+    }
+
+    const rows = [
+        [
+            Markup.button.callback('↩️ Refund This Run', 'tokens:runs:refund'),
+            Markup.button.callback('🪙 New Run', 'tokens:newrun')
+        ]
+    ];
+
+    if (retryableWalletCount > 0) {
+        rows.push([
+            Markup.button.callback(`🔁 Retry Failed (${retryableWalletCount})`, 'tokens:runs:retry')
+        ]);
+    }
+
+    rows.push(
+        [
+            Markup.button.callback('⬅️ Back', 'tokens:runs:back')
+        ],
+        [
+            Markup.button.callback('🏠 Main Menu', 'menu:main')
+        ]
+    );
+
+    await renderPanel(ctx, lines.join('\n'), rows);
 }
 
 async function startRefundFlow(ctx) {
@@ -1130,6 +1748,8 @@ async function beginMintExecution(ctx) {
             mintAddress: draft.mintAddress,
             totalAmount: draft.totalAmount,
             walletCount: draft.walletCount,
+            tokenName: draft.tokenName,
+            tokenSymbol: draft.tokenSymbol,
             connectionOptions: {
                 cluster: draft.network,
                 rpcUrl: draft.rpcOverride || undefined
@@ -1351,6 +1971,264 @@ async function beginMintRetryExecution(ctx) {
     }
 }
 
+async function startNewRunForCreatedToken(ctx, tokenRecord) {
+    const inheritedNetwork = normalizeBotNetwork(tokenRecord.network);
+
+    await startMintFlow(ctx, {
+        draftOverrides: {
+            mintAddress: tokenRecord.mintAddress,
+            totalAmount: '',
+            walletCount: '',
+            network: inheritedNetwork,
+            rpcOverride: tokenRecord.rpcUrl || getDefaultRpcForNetwork(inheritedNetwork),
+            tokenName: tokenRecord.tokenName || '',
+            tokenSymbol: tokenRecord.tokenSymbol || ''
+        },
+        editField: 'totalAmount',
+        promptQueue: ['walletCount']
+    });
+}
+
+async function beginTokenCreateExecution(ctx) {
+    const draft = ctx.session.tokenDraft;
+    const draftSnapshot = draft ? { ...draft } : createTokenDraft();
+    const invalidFields = getTokenDraftErrors(draft);
+
+    if (invalidFields.length) {
+        setError(ctx, `Fix these fields before creating the token: ${invalidFields.join(', ')}`);
+        await renderTokenCard(ctx);
+        return;
+    }
+
+    clearError(ctx);
+    ctx.session.busy = true;
+    await renderPanel(ctx, [
+        'Token Creation Starting',
+        '',
+        `Name: ${draft.tokenName}`,
+        `Symbol: ${draft.tokenSymbol}`,
+        `Decimals: ${draft.decimals}`,
+        `Initial Mint Amount: ${draft.initialMintAmount}`,
+        `Network: ${getNetworkLabel(draft.network)}`,
+        `RPC Override: ${formatRpcOverride(draft.rpcOverride, draft.network)}`,
+        '',
+        'Creating token and minting the initial amount into the bot wallet now.'
+    ].join('\n'), []);
+
+    try {
+        const tokenRecord = await executeTokenCreate({
+            tokenName: draft.tokenName,
+            tokenSymbol: draft.tokenSymbol,
+            metadataUri: '',
+            decimals: draft.decimals,
+            initialMintAmount: draft.initialMintAmount,
+            connectionOptions: {
+                cluster: draft.network,
+                rpcUrl: draft.rpcOverride || undefined
+            }
+        });
+
+        ctx.session.busy = false;
+        await startCreatedTokensFlow(ctx, {
+            selectedMintAddress: tokenRecord.mintAddress,
+            introText: `Token created successfully. Minted ${tokenRecord.initialMintAmount} into the bot wallet.`
+        });
+    } catch (error) {
+        ctx.session.busy = false;
+        if (!ctx.session.tokenDraft) {
+            ctx.session.tokenDraft = draftSnapshot;
+        }
+        setError(ctx, error.message);
+        await renderTokenCard(ctx);
+    }
+}
+
+async function beginAdditionalMintExecution(ctx) {
+    const state = ctx.session.createdTokenState;
+    const selectedToken = state.tokens[state.selectedTokenIndex];
+    const amount = String(state.additionalMintAmount || '').trim();
+
+    try {
+        parseTokenAmountToRaw(amount, selectedToken.decimals);
+    } catch (error) {
+        setError(ctx, 'Enter a valid amount before minting more tokens.');
+        await renderAdditionalMintCard(ctx);
+        return;
+    }
+
+    clearError(ctx);
+    ctx.session.busy = true;
+    await renderPanel(ctx, [
+        'Additional Mint Starting',
+        '',
+        `Token: ${getMintPrimaryLabel(selectedToken)}`,
+        `Mint Address: ${selectedToken.mintAddress}`,
+        `Amount: ${amount}`,
+        '',
+        'Minting additional tokens into the bot wallet now.'
+    ].join('\n'), []);
+
+    try {
+        const updatedToken = await executeAdditionalMint({
+            mintAddress: selectedToken.mintAddress,
+            amount,
+            connectionOptions: {
+                cluster: selectedToken.network,
+                rpcUrl: selectedToken.rpcUrl || undefined
+            }
+        });
+
+        state.tokens[state.selectedTokenIndex] = updatedToken;
+        state.additionalMintAmount = '';
+        ctx.session.busy = false;
+        ctx.session.editField = null;
+        await renderCreatedTokenDetail(ctx, `Additional mint completed. Minted ${amount} into the bot wallet.`);
+    } catch (error) {
+        ctx.session.busy = false;
+        setError(ctx, error.message);
+        await renderAdditionalMintCard(ctx);
+    }
+}
+
+async function beginAuthorityRevokeExecution(ctx, authorityKind) {
+    const state = ctx.session.createdTokenState;
+    const selectedToken = state.tokens[state.selectedTokenIndex];
+    const authorityLabel = authorityKind === 'freeze' ? 'Freeze' : 'Mint';
+
+    clearError(ctx);
+    ctx.session.busy = true;
+    await renderPanel(ctx, [
+        `${authorityLabel} Authority Revoke Starting`,
+        '',
+        `Token: ${getMintPrimaryLabel(selectedToken)}`,
+        `Mint Address: ${selectedToken.mintAddress}`,
+        `Network: ${getNetworkLabel(selectedToken.network)}`,
+        '',
+        `Revoking ${authorityLabel.toLowerCase()} authority on-chain now.`
+    ].join('\n'), []);
+
+    try {
+        const result = await executeRevokeAuthority({
+            mintAddress: selectedToken.mintAddress,
+            authorityKind,
+            connectionOptions: {
+                cluster: selectedToken.network,
+                rpcUrl: selectedToken.rpcUrl || undefined
+            }
+        });
+
+        ctx.session.busy = false;
+        await renderCreatedTokenDetail(
+            ctx,
+            `${authorityLabel} authority revoked. Signature: ${result.signature}`
+        );
+    } catch (error) {
+        ctx.session.busy = false;
+        setError(ctx, error.message);
+        await renderCreatedTokenDetail(ctx);
+    }
+}
+
+async function beginCreatedTokenMintRetryExecution(ctx) {
+    const state = ctx.session.createdTokenState;
+    const selectedToken = state.tokens[state.selectedTokenIndex];
+    const selectedRun = state.runs[state.selectedRunIndex];
+    const retryWallets = Array.isArray(selectedRun.wallets)
+        ? selectedRun.wallets.filter(wallet => RETRYABLE_MINT_STATUSES.has(wallet.status))
+        : [];
+    const retryableWalletCount = countRetryableWallets(selectedRun);
+
+    if (!retryableWalletCount) {
+        setError(ctx, 'This run has no failed wallets left to retry.');
+        await renderCreatedTokenRunDetail(ctx);
+        return;
+    }
+
+    clearError(ctx);
+    ctx.session.busy = true;
+    await renderPanel(ctx, [
+        'Retry Starting',
+        '',
+        `Mint: ${selectedToken.mintAddress}`,
+        `Run: ${selectedRun.runId}`,
+        `Wallets to Retry: ${retryableWalletCount}`,
+        `Network: ${getNetworkLabel(selectedRun.network)}`,
+        '',
+        'Progress is shown below in a single live message.'
+    ].join('\n'), []);
+
+    await updateOperationProgress(ctx, {
+        kind: 'mint',
+        phase: 'starting',
+        current: 0,
+        total: retryableWalletCount,
+        details: [
+            `Mint: ${selectedToken.mintAddress}`,
+            `Run: ${selectedRun.runId}`
+        ]
+    });
+
+    const progressReporter = createProgressReporter(
+        progress => updateOperationProgress(ctx, {
+            kind: 'mint',
+            phase: 'running',
+            current: progress.current,
+            total: progress.total,
+            latestWallet: progress.wallet,
+            details: [
+                `Mint: ${selectedToken.mintAddress}`,
+                `Run: ${selectedRun.runId}`
+            ]
+        }),
+        retryableWalletCount,
+        25
+    );
+
+    try {
+        const runRecord = await retryMintFailures({
+            mintAddress: selectedToken.mintAddress,
+            runId: selectedRun.runId,
+            connectionOptions: {
+                cluster: selectedRun.network,
+                rpcUrl: selectedRun.rpcUrl || undefined
+            },
+            onProgress: progressReporter
+        });
+        const remainingRetryableCount = countRetryableWallets(runRecord);
+
+        state.runs[state.selectedRunIndex] = runRecord;
+        ctx.session.busy = false;
+        await updateOperationProgress(ctx, {
+            kind: 'mint',
+            phase: 'completed',
+            current: retryableWalletCount,
+            total: retryableWalletCount,
+            latestWallet: runRecord.wallets.find(wallet => wallet.publicKey === retryWallets.slice(-1)[0]?.publicKey) || null,
+            details: [
+                `Mint: ${runRecord.mintAddress}`,
+                `Run: ${runRecord.runId}`
+            ],
+            summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
+        });
+        await renderMainMenu(ctx, 'Retry completed. Back at the main menu.');
+    } catch (error) {
+        ctx.session.busy = false;
+        await updateOperationProgress(ctx, {
+            kind: 'mint',
+            phase: 'failed',
+            current: 0,
+            total: retryableWalletCount,
+            details: [
+                `Mint: ${selectedToken.mintAddress}`,
+                `Run: ${selectedRun.runId}`
+            ],
+            summary: 'Result: failed',
+            error: error.message
+        });
+        await renderMainMenu(ctx, 'Retry failed. Back at the main menu.');
+    }
+}
+
 async function handleMintTextInput(ctx, text) {
     if (!ctx.session.editField) {
         await ctx.reply('Use the buttons on the mint card to choose what to edit.');
@@ -1373,9 +2251,53 @@ async function handleMintTextInput(ctx, text) {
     }
 }
 
+async function handleTokenTextInput(ctx, text) {
+    if (!ctx.session.editField) {
+        await ctx.reply('Use the buttons on the token card to choose what to edit.');
+        return;
+    }
+
+    try {
+        const nextValue = validateTokenDraftField(ctx.session.editField, text);
+        ctx.session.tokenDraft[ctx.session.editField] = nextValue;
+        clearError(ctx);
+        ctx.session.editField = null;
+        await renderTokenCard(ctx);
+    } catch (error) {
+        setError(ctx, error.message);
+        await renderTokenCard(ctx);
+    }
+}
+
+async function handleAdditionalMintTextInput(ctx, text) {
+    const state = ctx.session.createdTokenState;
+    const selectedToken = state.tokens[state.selectedTokenIndex];
+
+    if (ctx.session.editField !== 'additionalMintAmount') {
+        await ctx.reply('Use the amount button to choose what to edit.');
+        return;
+    }
+
+    try {
+        parseTokenAmountToRaw(text, selectedToken.decimals);
+        state.additionalMintAmount = String(text).trim();
+        ctx.session.editField = null;
+        clearError(ctx);
+        await renderAdditionalMintCard(ctx);
+    } catch (error) {
+        setError(ctx, error.message);
+        await renderAdditionalMintCard(ctx);
+    }
+}
+
 async function handleMenuAction(ctx, action) {
     if (action === 'main') {
         await renderMainMenu(ctx);
+        return;
+    }
+
+    if (action === 'create') {
+        await startTokenCreateFlow(ctx);
         return;
     }
 
@@ -1391,6 +2313,11 @@ async function handleMenuAction(ctx, action) {
 
     if (action === 'mints') {
         await startBrowseMintsFlow(ctx);
+        return;
+    }
+
+    if (action === 'tokens') {
+        await startCreatedTokensFlow(ctx);
         return;
     }
 
@@ -1467,6 +2394,66 @@ async function handleCallback(ctx) {
     if (data === 'mint:start') {
         await answerCallback(ctx);
         await beginMintExecution(ctx);
+        return;
+    }
+
+    if (data === 'token:edit:metadataUri') {
+        await answerCallback(ctx, 'That field is no longer used.');
+        ctx.session.flow = 'tokenCreate';
+        ctx.session.editField = null;
+        clearError(ctx);
+        await renderTokenCard(ctx);
+        return;
+    }
+
+    if (data.startsWith('token:edit:')) {
+        await answerCallback(ctx, 'Send the new value in chat.');
+        ctx.session.flow = 'tokenCreate';
+        ctx.session.editField = data.split(':')[2];
+        clearError(ctx);
+        await renderTokenCard(ctx);
+        return;
+    }
+
+    if (data === 'token:network') {
+        await answerCallback(ctx);
+        ctx.session.flow = 'tokenCreate';
+        ctx.session.editField = null;
+        clearError(ctx);
+        await renderTokenNetworkPicker(ctx);
+        return;
+    }
+
+    if (data.startsWith('token:setnet:')) {
+        await answerCallback(ctx, 'Network updated.');
+        ctx.session.tokenDraft.network = normalizeBotNetwork(data.split(':')[2]);
+        ctx.session.tokenDraft.rpcOverride = getDefaultRpcForNetwork(ctx.session.tokenDraft.network);
+        ctx.session.editField = null;
+        clearError(ctx);
+        await renderTokenCard(ctx);
+        return;
+    }
+
+    if (data === 'token:back') {
+        await answerCallback(ctx);
+        ctx.session.editField = null;
+        clearError(ctx);
+        await renderTokenCard(ctx);
+        return;
+    }
+
+    if (data === 'token:rpc:default') {
+        await answerCallback(ctx, 'RPC reset to the configured default.');
+        ctx.session.tokenDraft.rpcOverride = getDefaultRpcForNetwork(ctx.session.tokenDraft.network);
+        ctx.session.editField = null;
+        clearError(ctx);
+        await renderTokenCard(ctx);
+        return;
+    }
+
+    if (data === 'token:start') {
+        await answerCallback(ctx);
+        await beginTokenCreateExecution(ctx);
         return;
     }
 
@@ -1706,6 +2693,177 @@ async function handleCallback(ctx) {
         return;
     }
 
+    if (data.startsWith('tokens:page:')) {
+        await answerCallback(ctx);
+        ctx.session.createdTokenState.tokenPage = Number.parseInt(data.split(':')[2], 10) || 0;
+        clearError(ctx);
+        await renderCreatedTokenPicker(ctx);
+        return;
+    }
+
+    if (data.startsWith('tokens:token:')) {
+        await answerCallback(ctx);
+        const index = Number.parseInt(data.split(':')[2], 10);
+        const state = ctx.session.createdTokenState;
+
+        if (!Number.isInteger(index) || !state.tokens[index]) {
+            setError(ctx, 'Selected token is no longer available.');
+            await renderCreatedTokenPicker(ctx);
+            return;
+        }
+
+        state.selectedTokenIndex = index;
+        clearError(ctx);
+        await renderCreatedTokenDetail(ctx);
+        return;
+    }
+
+    if (data === 'tokens:back') {
+        await answerCallback(ctx);
+        clearError(ctx);
+        await renderCreatedTokenPicker(ctx);
+        return;
+    }
+
+    if (data === 'tokens:detail') {
+        await answerCallback(ctx);
+        clearError(ctx);
+        await renderCreatedTokenDetail(ctx);
+        return;
+    }
+
+    if (data === 'tokens:newrun') {
+        await answerCallback(ctx);
+        await startNewRunForCreatedToken(ctx, ctx.session.createdTokenState.tokens[ctx.session.createdTokenState.selectedTokenIndex]);
+        return;
+    }
+
+    if (data === 'tokens:additionalmint') {
+        await answerCallback(ctx);
+        ctx.session.flow = 'tokenAdditionalMint';
+        ctx.session.view = 'additionalMint';
+        ctx.session.editField = null;
+        ctx.session.createdTokenState.additionalMintAmount = '';
+        clearError(ctx);
+        await renderAdditionalMintCard(ctx);
+        return;
+    }
+
+    if (data === 'tokens:additionalmint:edit') {
+        await answerCallback(ctx, 'Send the amount in chat.');
+        ctx.session.flow = 'tokenAdditionalMint';
+        ctx.session.view = 'additionalMint';
+        ctx.session.editField = 'additionalMintAmount';
+        clearError(ctx);
+        await renderAdditionalMintCard(ctx);
+        return;
+    }
+
+    if (data === 'tokens:additionalmint:start') {
+        await answerCallback(ctx);
+        await beginAdditionalMintExecution(ctx);
+        return;
+    }
+
+    if (data === 'tokens:revoke:mint') {
+        await answerCallback(ctx);
+        await beginAuthorityRevokeExecution(ctx, 'mint');
+        return;
+    }
+
+    if (data === 'tokens:revoke:freeze') {
+        await answerCallback(ctx);
+        await beginAuthorityRevokeExecution(ctx, 'freeze');
+        return;
+    }
+
+    if (data === 'tokens:additionalmint:back') {
+        await answerCallback(ctx);
+        ctx.session.flow = 'createdTokens';
+        ctx.session.view = 'detail';
+        ctx.session.editField = null;
+        ctx.session.createdTokenState.additionalMintAmount = '';
+        clearError(ctx);
+        await renderCreatedTokenDetail(ctx);
+        return;
+    }
+
+    if (data === 'tokens:viewruns') {
+        await answerCallback(ctx);
+        const state = ctx.session.createdTokenState;
+        state.runs = await listRuns(state.tokens[state.selectedTokenIndex].mintAddress);
+        state.runPage = 0;
+        state.selectedRunIndex = null;
+
+        if (!state.runs.length) {
+            setError(ctx, 'No saved runs found for this token yet.');
+            await renderCreatedTokenDetail(ctx);
+            return;
+        }
+
+        clearError(ctx);
+        await renderCreatedTokenRunPicker(ctx);
+        return;
+    }
+
+    if (data.startsWith('tokens:runs:page:')) {
+        await answerCallback(ctx);
+        ctx.session.createdTokenState.runPage = Number.parseInt(data.split(':')[3], 10) || 0;
+        clearError(ctx);
+        await renderCreatedTokenRunPicker(ctx);
+        return;
+    }
+
+    if (data.startsWith('tokens:runs:run:')) {
+        await answerCallback(ctx);
+        const index = Number.parseInt(data.split(':')[3], 10);
+        const state = ctx.session.createdTokenState;
+
+        if (!Number.isInteger(index) || !state.runs[index]) {
+            setError(ctx, 'Selected run is no longer available.');
+            await renderCreatedTokenRunPicker(ctx);
+            return;
+        }
+
+        state.selectedRunIndex = index;
+        clearError(ctx);
+        await renderCreatedTokenRunDetail(ctx);
+        return;
+    }
+
+    if (data === 'tokens:runs:back') {
+        await answerCallback(ctx);
+        clearError(ctx);
+        await renderCreatedTokenRunPicker(ctx);
+        return;
+    }
+
+    if (data === 'tokens:runs:retry') {
+        await answerCallback(ctx);
+        await beginCreatedTokenMintRetryExecution(ctx);
+        return;
+    }
+
+    if (data === 'tokens:runs:refund') {
+        await answerCallback(ctx);
+        const tokenState = ctx.session.createdTokenState;
+        const selectedToken = tokenState.tokens[tokenState.selectedTokenIndex];
+        const mints = [createMintSummaryFromRuns(selectedToken, tokenState.runs)];
+        const runs = tokenState.runs;
+        const selectedRunIndex = tokenState.selectedRunIndex;
+
+        resetSession(ctx);
+        ctx.session.flow = 'refund';
+        ctx.session.view = 'confirm';
+        ctx.session.refundState = createRefundState();
+        ctx.session.refundState.mints = mints;
+        ctx.session.refundState.selectedMintIndex = 0;
+        ctx.session.refundState.runs = runs;
+        ctx.session.refundState.selectedRunIndex = selectedRunIndex;
+        await renderRefundConfirm(ctx);
+        return;
+    }
+
     await answerCallback(ctx);
 }
 
@@ -1810,6 +2968,15 @@ bot.command('mint', async ctx => {
     await startMintFlow(ctx);
 });
 
+bot.command('create', async ctx => {
+    if (ctx.session.busy) {
+        await ctx.reply('An operation is already running.');
+        return;
+    }
+
+    await startTokenCreateFlow(ctx);
+});
+
 bot.command('refund', async ctx => {
     if (ctx.session.busy) {
         await ctx.reply('An operation is already running.');
@@ -1826,6 +2993,15 @@ bot.command('mints', async ctx => {
     }
 
     await startBrowseMintsFlow(ctx);
+});
+
+bot.command('tokens', async ctx => {
+    if (ctx.session.busy) {
+        await ctx.reply('An operation is already running.');
+        return;
+    }
+
+    await startCreatedTokensFlow(ctx);
 });
 
 bot.command('runs', async ctx => {
@@ -1853,6 +3029,16 @@ bot.on('text', async ctx => {
 
     if (ctx.session.flow === 'mint') {
         await handleMintTextInput(ctx, ctx.message.text);
+        return;
+    }
+
+    if (ctx.session.flow === 'tokenCreate') {
+        await handleTokenTextInput(ctx, ctx.message.text);
+        return;
+    }
+
+    if (ctx.session.flow === 'tokenAdditionalMint') {
+        await handleAdditionalMintTextInput(ctx, ctx.message.text);
         return;
     }
 
