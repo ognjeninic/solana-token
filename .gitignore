@@ -1,4 +1,9 @@
 *.zip
+.env
+.npm-cache/
+data/
+errors.txt
 node_modules
 package-lock.json
 solana-token-tools.code-workspace
+wallets.json
