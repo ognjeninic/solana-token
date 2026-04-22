@@ -6,8 +6,10 @@ const { backfillMintMetadata, listMintSummaries, listRuns, loadRun } = require('
 const { listTokens } = require('./lib/storage/tokenStore');
 const { executeMintRun, retryMintFailures } = require('./lib/services/mintService');
 const { executeRefundRun } = require('./lib/services/refundService');
-const { executeAdditionalMint, executeRevokeAuthority, executeTokenCreate, fetchTokenAuthorityStatus } = require('./lib/services/tokenService');
+const { executeAdditionalMint, executeRevokeAuthority, executeTokenCreate, fetchBotWalletTokenBalance, fetchTokenAuthorityStatus } = require('./lib/services/tokenService');
+const { createDammPool, listHeldTokens } = require('./lib/services/meteoraService');
 const { createConnection, fetchTokenMetadata } = require('./lib/services/solana');
+const { createAuthorityFundingQrPng, fetchAuthoritySolBalances, getAuthorityPublicKey } = require('./lib/services/walletService');
 const { createProgressReporter, formatProgressBar, formatRawAmount, parseIntegerInRange, parsePositiveInteger, parsePositiveNumber, parseTokenAmountToRaw } = require('./lib/utils');
 
 const config = loadConfig({ requireTelegram: true });
@@ -44,6 +46,7 @@ function createDefaultSession() {
         error: null,
         mintDraft: null,
         tokenDraft: null,
+        poolState: null,
         refundState: null,
         browseState: null,
         createdTokenState: null
@@ -128,6 +131,35 @@ function createCreatedTokenState() {
     };
 }
 
+function createPoolDraft(overrides = {}) {
+    const requestedNetwork = overrides.network || config.defaultCluster;
+    const defaultNetwork = normalizeBotNetwork(requestedNetwork);
+
+    return {
+        network: defaultNetwork,
+        tokenMintAddress: '',
+        tokenName: '',
+        tokenSymbol: '',
+        tokenDecimals: 0,
+        tokenProgramId: '',
+        tokenBalance: '0',
+        solBalance: '0',
+        solAmount: '',
+        tokenAmount: '',
+        ...overrides
+    };
+}
+
+function createPoolState() {
+    return {
+        network: null,
+        tokens: [],
+        tokenPage: 0,
+        selectedTokenIndex: null,
+        draft: null
+    };
+}
+
 function isAuthorized(ctx) {
     const userId = String(ctx.from?.id || '');
     const chatId = String(ctx.chat?.id || '');
@@ -164,6 +196,7 @@ function resetSession(ctx, options = {}) {
     ctx.session.error = null;
     ctx.session.mintDraft = null;
     ctx.session.tokenDraft = null;
+    ctx.session.poolState = null;
     ctx.session.refundState = null;
     ctx.session.browseState = null;
     ctx.session.createdTokenState = null;
@@ -191,6 +224,10 @@ function buildActionButtons() {
     return [
         [
             Markup.button.callback('🛠️ Create Token', 'menu:create')
+        ],
+        [
+            Markup.button.callback('💼 Wallet', 'menu:wallet'),
+            Markup.button.callback('🌊 DAMM Pool', 'menu:pool')
         ],
         [
             Markup.button.callback('🪙 Mint', 'menu:mint'),
@@ -349,6 +386,11 @@ function truncateText(text, maxLength = 40) {
     return `${value.slice(0, maxLength - 1)}…`;
 }
 
+function formatBanner(title) {
+    const label = String(title || '').trim().toUpperCase();
+    return `━━ ${label} ━━`;
+}
+
 function getTokenDisplay(entity) {
     const source = entity || {};
     const tokenSymbol = String(source.tokenSymbol || '').trim();
@@ -416,6 +458,57 @@ function formatRpcOverride(rpcOverride, network) {
     }
 
     return rpcOverride;
+}
+
+function formatSolBalanceLine(label, solBalance) {
+    if (!solBalance) {
+        return `${label}: unavailable`;
+    }
+
+    return `${label}: ${solBalance.balance} SOL`;
+}
+
+function validatePoolDraftField(field, value) {
+    const trimmed = String(value).trim();
+
+    if (field === 'solAmount') {
+        parsePositiveNumber(trimmed, 'SOL amount');
+        return trimmed;
+    }
+
+    if (field === 'tokenAmount') {
+        parsePositiveNumber(trimmed, 'Token amount');
+        return trimmed;
+    }
+
+    throw new Error('Unknown field.');
+}
+
+function getPoolDraftErrors(draft) {
+    const errors = [];
+    const source = draft || createPoolDraft();
+
+    if (!NETWORKS.includes(source.network)) {
+        errors.push('Network');
+    }
+
+    if (!String(source.tokenMintAddress || '').trim()) {
+        errors.push('Token');
+    }
+
+    try {
+        parsePositiveNumber(source.solAmount, 'SOL amount');
+    } catch (error) {
+        errors.push('SOL amount');
+    }
+
+    try {
+        parsePositiveNumber(source.tokenAmount, 'Token amount');
+    } catch (error) {
+        errors.push('Token amount');
+    }
+
+    return errors;
 }
 
 async function ensureMintSummaryMetadata(summary) {
@@ -586,7 +679,7 @@ function formatMintCardText(ctx) {
     const errors = draft ? getMintDraftErrors(draft) : [];
     const tokenDisplay = getTokenDisplay(draft);
     const lines = [
-        'Mint Configuration',
+        formatBanner('Mint Configuration'),
         '',
         ...(tokenDisplay ? [`Token: ${tokenDisplay}`] : []),
         `Mint Address: ${formatMintAddress(draft.mintAddress)}`,
@@ -627,7 +720,7 @@ function formatTokenCardText(ctx) {
     const errors = getTokenDraftErrors(draft);
     const tokenDisplay = getTokenDisplay(draft);
     const lines = [
-        'Token Creation',
+        formatBanner('Token Creation'),
         '',
         ...(tokenDisplay ? [`Token: ${tokenDisplay}`] : []),
         `Name: ${draft.tokenName || 'Not set'}`,
@@ -756,7 +849,7 @@ function buildTokenNetworkButtons(selectedNetwork) {
 
 function formatNetworkPickerText(ctx) {
     const lines = [
-        'Select Network',
+        formatBanner('Select Network'),
         '',
         `Current: ${getNetworkLabel(ctx.session.mintDraft.network)}`,
         `RPC Override: ${formatRpcOverride(ctx.session.mintDraft.rpcOverride, ctx.session.mintDraft.network)}`,
@@ -774,7 +867,7 @@ function formatNetworkPickerText(ctx) {
 
 function formatTokenNetworkPickerText(ctx) {
     const lines = [
-        'Select Network',
+        formatBanner('Select Network'),
         '',
         `Current: ${getNetworkLabel(ctx.session.tokenDraft.network)}`,
         `RPC Override: ${formatRpcOverride(ctx.session.tokenDraft.rpcOverride, ctx.session.tokenDraft.network)}`,
@@ -805,7 +898,7 @@ function buildProgressText({
     const percent = Math.round((safeCurrent / safeTotal) * 100);
     const title = kind === 'refund' ? 'Refund Progress' : 'Mint Progress';
     const lines = [
-        title,
+        formatBanner(title),
         '',
         `${formatProgressBar(safeCurrent, safeTotal, 20)} ${percent}%`,
         `${safeCurrent}/${safeTotal} wallets`
@@ -1041,16 +1134,233 @@ async function getCreatedTokenRunSummary(token) {
     };
 }
 
+async function getMainMenuText(introText) {
+    const lines = [
+        formatBanner('Solana Token Tools'),
+        ''
+    ];
+
+    try {
+        const balances = await fetchAuthoritySolBalances();
+        lines.push(`💼 Wallet: ${balances.address}`);
+        lines.push(formatSolBalanceLine('🟢 Mainnet', balances.mainnet));
+        lines.push(formatSolBalanceLine('🔵 Devnet', balances.devnet));
+    } catch (error) {
+        lines.push('💼 Wallet balances are temporarily unavailable.');
+    }
+
+    lines.push('');
+    lines.push(introText || 'Choose an action from the button menu below.');
+    return lines.join('\n');
+}
+
 async function renderMainMenu(ctx, introText, options = {}) {
     resetSession(ctx, {
         preservePanel: !options.forceNewMessage
     });
-    const text = introText || [
-        'Solana Token Tools',
-        '',
-        'Choose an action from the button menu below.'
-    ].join('\n');
+    const text = await getMainMenuText(introText);
     await renderPanel(ctx, text, buildActionButtons());
+}
+
+function formatHeldTokenPickerLabel(token) {
+    return `🪙 ${truncateText(getMintPrimaryLabel(token), 18)} • ${truncateText(token.balance, 8)}`;
+}
+
+function buildHeldTokenListButtons(tokens, page, selectionPrefix, pagePrefix, backCallback) {
+    const { items, page: safePage, totalPages } = paginate(tokens, page);
+    const rows = items.map((token, index) => [
+        Markup.button.callback(
+            formatHeldTokenPickerLabel(token),
+            `${selectionPrefix}:${safePage * PAGE_SIZE + index}`
+        )
+    ]);
+    const paginationRow = buildPaginationRow(pagePrefix, safePage, totalPages);
+
+    if (paginationRow.length) {
+        rows.push(paginationRow);
+    }
+
+    rows.push([
+        Markup.button.callback('⬅️ Back', backCallback),
+        Markup.button.callback('🏠 Main Menu', 'menu:main')
+    ]);
+
+    return {
+        rows,
+        page: safePage,
+        totalPages
+    };
+}
+
+async function renderWalletView(ctx, introText) {
+    resetSession(ctx);
+    ctx.session.flow = 'wallet';
+    ctx.session.view = 'wallet';
+
+    let balances = null;
+    let errorMessage = '';
+
+    try {
+        balances = await fetchAuthoritySolBalances();
+    } catch (error) {
+        errorMessage = error.message;
+    }
+
+    const address = getAuthorityPublicKey().toBase58();
+    const lines = [
+        formatBanner('Bot Wallet'),
+        '',
+        ...(introText ? [introText, ''] : []),
+        `🔑 Full Address: ${address}`,
+        `✂️ Short Address: ${formatShortAddress(address)}`,
+        ''
+    ];
+
+    if (balances) {
+        lines.push(formatSolBalanceLine('🟢 Mainnet', balances.mainnet));
+        lines.push(formatSolBalanceLine('🔵 Devnet', balances.devnet));
+    } else {
+        lines.push('SOL balances are temporarily unavailable.');
+    }
+
+    if (errorMessage) {
+        lines.push('');
+        lines.push(`Error: ${errorMessage}`);
+    }
+
+    await renderPanel(ctx, lines.join('\n'), [
+        [
+            Markup.button.callback('📋 Send Address', 'wallet:address'),
+            Markup.button.callback('📷 QR Code', 'wallet:qr')
+        ],
+        [
+            Markup.button.callback('🏠 Main Menu', 'menu:main')
+        ]
+    ]);
+}
+
+async function startPoolFlow(ctx) {
+    resetSession(ctx);
+    ctx.session.flow = 'pool';
+    ctx.session.view = 'network';
+    ctx.session.poolState = createPoolState();
+    await renderPoolNetworkPicker(ctx);
+}
+
+async function renderPoolNetworkPicker(ctx) {
+    const state = ctx.session.poolState || createPoolState();
+    ctx.session.poolState = state;
+    ctx.session.flow = 'pool';
+    ctx.session.view = 'network';
+    const lines = [
+        formatBanner('DAMM Pool'),
+        '',
+        'Choose the network for the SOL + token DAMM v2 pool.'
+    ];
+
+    if (ctx.session.error) {
+        lines.push('');
+        lines.push(`Error: ${ctx.session.error}`);
+    }
+
+    await renderPanel(ctx, lines.join('\n'), [
+        [Markup.button.callback('🟢 Mainnet', 'pool:network:mainnet')],
+        [Markup.button.callback('🔵 Devnet', 'pool:network:devnet')],
+        [Markup.button.callback('🏠 Main Menu', 'menu:main')]
+    ]);
+}
+
+async function renderPoolTokenPicker(ctx, introText) {
+    const state = ctx.session.poolState;
+    const { rows, page, totalPages } = buildHeldTokenListButtons(
+        state.tokens,
+        state.tokenPage,
+        'pool:token',
+        'pool:tokens:page',
+        'pool:back:network'
+    );
+
+    state.tokenPage = page;
+    const lines = [
+        formatBanner('Select Pool Token'),
+        '',
+        `🌐 Network: ${getNetworkLabel(state.network)}`,
+        `Page ${page + 1} of ${totalPages}`,
+        introText || 'Choose a token with a positive wallet balance. SOL is the quote asset automatically.'
+    ];
+
+    if (ctx.session.error) {
+        lines.push('');
+        lines.push(`Error: ${ctx.session.error}`);
+    }
+
+    await renderPanel(ctx, lines.join('\n'), rows);
+}
+
+function formatPoolCardText(ctx) {
+    const draft = ctx.session.poolState?.draft || createPoolDraft();
+    const errors = getPoolDraftErrors(draft);
+    const tokenDisplay = getTokenDisplay(draft);
+    const lines = [
+        formatBanner('DAMM Pool Configuration'),
+        '',
+        `🌐 Network: ${getNetworkLabel(draft.network)}`,
+        `🪙 Token: ${tokenDisplay || formatMintAddress(draft.tokenMintAddress)}`,
+        `🧾 Mint Address: ${draft.tokenMintAddress}`,
+        `💵 Token Balance: ${draft.tokenBalance || '0'}`,
+        `◎ SOL Balance: ${draft.solBalance || '0'}`,
+        '',
+        'Pool Type: Meteora DAMM v2',
+        'Price: derived automatically from token amount and SOL amount',
+        `◎ SOL Amount: ${draft.solAmount || 'Not set'}`,
+        `🪙 Token Amount: ${draft.tokenAmount || 'Not set'}`,
+        ''
+    ];
+
+    if (ctx.session.editField === 'solAmount') {
+        lines.push('Editing SOL Amount: send a positive number in chat.');
+    } else if (ctx.session.editField === 'tokenAmount') {
+        lines.push('Editing Token Amount: send a positive number in chat.');
+    } else {
+        lines.push('Set the liquidity amounts. DAMM will derive the starting price from the deposit ratio.');
+    }
+
+    if (errors.length) {
+        lines.push('');
+        lines.push(`Missing or invalid: ${errors.join(', ')}`);
+    }
+
+    if (ctx.session.error) {
+        lines.push('');
+        lines.push(`Error: ${ctx.session.error}`);
+    }
+
+    return lines.join('\n');
+}
+
+function buildPoolCardButtons(ctx) {
+    const draft = ctx.session.poolState?.draft || createPoolDraft();
+    const startReady = getPoolDraftErrors(draft).length === 0;
+
+    return [
+        [
+            Markup.button.callback('◎ SOL Amount', 'pool:edit:solAmount'),
+            Markup.button.callback('🪙 Token Amount', 'pool:edit:tokenAmount')
+        ],
+        [
+            Markup.button.callback(startReady ? '🌊 Create DAMM Pool' : '⚠️ Fix Fields First', 'pool:start')
+        ],
+        [
+            Markup.button.callback('⬅️ Change Token', 'pool:back:tokens'),
+            Markup.button.callback('🏠 Main Menu', 'menu:main')
+        ]
+    ];
+}
+
+async function renderPoolCard(ctx) {
+    ctx.session.flow = 'pool';
+    ctx.session.view = 'config';
+    await renderPanel(ctx, formatPoolCardText(ctx), buildPoolCardButtons(ctx));
 }
 
 async function updateOperationProgress(ctx, snapshot) {
@@ -1108,7 +1418,11 @@ async function startCreatedTokensFlow(ctx, options = {}) {
     ctx.session.createdTokenState.tokens = await listTokens();
 
     if (!ctx.session.createdTokenState.tokens.length) {
-        await renderPanel(ctx, options.introText || 'No created tokens found.', [
+        await renderPanel(ctx, [
+            formatBanner('Created Tokens'),
+            '',
+            options.introText || 'No created tokens found.'
+        ].join('\n'), [
             [Markup.button.callback('🏠 Main Menu', 'menu:main')]
         ]);
         return;
@@ -1141,7 +1455,7 @@ async function renderCreatedTokenPicker(ctx, introText) {
 
     state.tokenPage = page;
     const lines = [
-        'Created Tokens',
+        formatBanner('Created Tokens'),
         '',
         `Page ${page + 1} of ${totalPages}`,
         introText || 'Choose a token you created to inspect it or start a new mint run.'
@@ -1168,6 +1482,10 @@ async function renderCreatedTokenDetail(ctx, introText) {
         mintAuthority: null,
         freezeAuthority: null
     };
+    let walletBalance = {
+        balance: '0',
+        tokenAccount: selectedToken.authorityTokenAccount || ''
+    };
 
     try {
         authorityStatus = await fetchTokenAuthorityStatus({
@@ -1181,27 +1499,43 @@ async function renderCreatedTokenDetail(ctx, introText) {
         void error;
     }
 
+    try {
+        walletBalance = await fetchBotWalletTokenBalance({
+            mintAddress: selectedToken.mintAddress,
+            connectionOptions: {
+                cluster: selectedToken.network,
+                rpcUrl: selectedToken.rpcUrl || undefined
+            }
+        });
+    } catch (error) {
+        void error;
+    }
+
     const lines = [
-        'Created Token Details',
+        formatBanner('Created Token Details'),
         '',
         ...(introText ? [introText, ''] : []),
-        ...(tokenDisplay ? [`Token: ${tokenDisplay}`] : []),
-        `Mint Address: ${selectedToken.mintAddress}`,
-        `Decimals: ${selectedToken.decimals}`,
-        `Mint Authority: ${authorityStatus.mintAuthority ? 'Active' : 'Revoked'}`,
-        `Freeze Authority: ${authorityStatus.freezeAuthority ? 'Active' : 'Revoked'}`,
-        `Initial Mint Amount: ${selectedToken.initialMintAmount || '0'}`,
-        `Total Minted To Bot Wallet: ${totals.botWallet}`,
-        `Total Minted To Temporary Wallets: ${totals.temporaryWallets}`,
-        `Total Minted Across All Bot Actions: ${totals.acrossAll}`,
-        `Network: ${getNetworkLabel(selectedToken.network)}`,
-        `RPC: ${selectedToken.rpcUrl || 'Automatic'}`,
-        `Bot Token Account: ${selectedToken.authorityTokenAccount || 'Unknown'}`,
-        `Created: ${selectedToken.createdAt}`,
-        `Runs: ${summary.runCount}`,
-        `Latest Run: ${summary.latestRunId}`,
-        `Latest Status: ${summary.latestStatus}`,
-        `Latest Date: ${summary.latestRunAt}`
+        ...(tokenDisplay ? [`🪙 Token: ${tokenDisplay}`] : []),
+        `🧾 Mint Address: ${selectedToken.mintAddress}`,
+        `🔢 Decimals: ${selectedToken.decimals}`,
+        `🔒 Mint Authority: ${authorityStatus.mintAuthority ? '🟢 Active' : '🔴 Revoked'}`,
+        `🧊 Freeze Authority: ${authorityStatus.freezeAuthority ? '🟢 Active' : '🔴 Revoked'}`,
+        '',
+        `🌐 Network: ${getNetworkLabel(selectedToken.network)}`,
+        `🔧 RPC: ${selectedToken.rpcUrl || 'Automatic'}`,
+        `🏦 Bot Token Account: ${walletBalance.tokenAccount || selectedToken.authorityTokenAccount || 'Unknown'}`,
+        '',
+        `📅 Created: ${selectedToken.createdAt}`,
+        `🧾 Runs: ${summary.runCount}`,
+        `🆔 Latest Run: ${summary.latestRunId}`,
+        `📊 Latest Status: ${summary.latestStatus}`,
+        `🕒 Latest Date: ${summary.latestRunAt}`,
+        '',
+        `💸 Initial Mint Amount: ${selectedToken.initialMintAmount || '0'}`,
+        `📈 Total Minted To Bot Wallet: ${totals.botWallet}`,
+        `👛 Total Minted To Temporary Wallets: ${totals.temporaryWallets}`,
+        `🧮 Total Minted Across All Bot Actions: ${totals.acrossAll}`,
+        `💼 Current Balance In Bot Wallet: ${walletBalance.balance}`
     ];
 
     if (ctx.session.error) {
@@ -1253,7 +1587,7 @@ async function renderAdditionalMintCard(ctx) {
     const state = ctx.session.createdTokenState;
     const selectedToken = state.tokens[state.selectedTokenIndex];
     const lines = [
-        'Additional Mint',
+        formatBanner('Additional Mint'),
         '',
         `Token: ${getMintPrimaryLabel(selectedToken)}`,
         `Mint Address: ${selectedToken.mintAddress}`,
@@ -1300,7 +1634,7 @@ async function renderCreatedTokenRunPicker(ctx) {
 
     state.runPage = page;
     const lines = [
-        'Created Token Runs',
+        formatBanner('Created Token Runs'),
         '',
         `Token: ${getMintPrimaryLabel(selectedToken)}`,
         `Address: ${selectedToken.mintAddress}`,
@@ -1326,12 +1660,13 @@ async function renderCreatedTokenRunDetail(ctx) {
     const selectedRun = state.runs[state.selectedRunIndex];
     const retryableWalletCount = countRetryableWallets(selectedRun);
     const lines = [
-        'Created Token Run Details',
+        formatBanner('Created Token Run Details'),
         '',
         `Token: ${getMintPrimaryLabel(selectedToken)}`,
         `Address: ${selectedToken.mintAddress}`,
         `Run: ${selectedRun.runId}`,
         `Status: ${selectedRun.status}`,
+        `Total Amount: ${selectedRun.totalAmount}`,
         `Wallets: ${selectedRun.walletCount}`,
         `Network: ${getNetworkLabel(selectedRun.network)}`,
         `RPC: ${selectedRun.rpcUrl || 'Automatic'}`,
@@ -1377,7 +1712,11 @@ async function startRefundFlow(ctx) {
     ctx.session.refundState.mints = await listMintSummaries();
 
     if (!ctx.session.refundState.mints.length) {
-        await renderPanel(ctx, 'No saved mints found.', [
+        await renderPanel(ctx, [
+            formatBanner('Refund Select Mint'),
+            '',
+            'No saved mints found.'
+        ].join('\n'), [
             [Markup.button.callback('🏠 Main Menu', 'menu:main')]
         ]);
         return;
@@ -1400,7 +1739,7 @@ async function renderRefundMintPicker(ctx) {
     state.mintPage = page;
 
     const lines = [
-        'Refund: Select Mint',
+        formatBanner('Refund Select Mint'),
         '',
         `Page ${page + 1} of ${totalPages}`,
         'Choose the mint you want to refund.'
@@ -1427,7 +1766,7 @@ async function renderRefundRunPicker(ctx) {
 
     state.runPage = page;
     const lines = [
-        'Refund: Select Run',
+        formatBanner('Refund Select Run'),
         '',
         `Mint: ${selectedMint.mintAddress}`,
         `Page ${page + 1} of ${totalPages}`,
@@ -1448,11 +1787,12 @@ async function renderRefundConfirm(ctx) {
     const selectedRun = state.runs[state.selectedRunIndex];
 
     const lines = [
-        'Refund Confirmation',
+        formatBanner('Refund Confirmation'),
         '',
         `Mint: ${selectedMint.mintAddress}`,
         `Run: ${selectedRun.runId}`,
         `Status: ${selectedRun.status}`,
+        `Total Amount: ${selectedRun.totalAmount}`,
         `Wallets: ${selectedRun.walletCount}`,
         `Created: ${selectedRun.createdAt}`,
         '',
@@ -1483,7 +1823,11 @@ async function startBrowseMintsFlow(ctx) {
     ctx.session.browseState.mints = await listMintSummaries();
 
     if (!ctx.session.browseState.mints.length) {
-        await renderPanel(ctx, 'No saved mints found.', [
+        await renderPanel(ctx, [
+            formatBanner('Saved Mints'),
+            '',
+            'No saved mints found.'
+        ].join('\n'), [
             [Markup.button.callback('🏠 Main Menu', 'menu:main')]
         ]);
         return;
@@ -1508,7 +1852,7 @@ async function renderBrowseMintPicker(ctx) {
     state.mintPage = page;
 
     const lines = [
-        state.mode === 'runs' ? 'Runs: Select Mint' : 'Saved Mints',
+        formatBanner(state.mode === 'runs' ? 'Runs Select Mint' : 'Saved Mints'),
         '',
         `Page ${page + 1} of ${totalPages}`,
         state.mode === 'runs'
@@ -1530,7 +1874,7 @@ async function renderBrowseMintDetail(ctx) {
     await ensureMintSummaryMetadata(selectedMint);
     const tokenDisplay = getTokenDisplay(selectedMint);
     const lines = [
-        'Mint Details',
+        formatBanner('Mint Details'),
         '',
         ...(tokenDisplay ? [`Token: ${tokenDisplay}`] : []),
         `Mint Address: ${selectedMint.mintAddress}`,
@@ -1573,7 +1917,7 @@ async function renderBrowseRunPicker(ctx) {
 
     state.runPage = page;
     const lines = [
-        'Saved Runs',
+        formatBanner('Saved Runs'),
         '',
         `Mint: ${getMintPrimaryLabel(selectedMint)}`,
         `Address: ${selectedMint.mintAddress}`,
@@ -1600,12 +1944,13 @@ async function renderBrowseRunDetail(ctx) {
     const retryableWalletCount = countRetryableWallets(selectedRun);
     await ensureMintSummaryMetadata(selectedMint);
     const lines = [
-        'Run Details',
+        formatBanner('Run Details'),
         '',
         `Mint: ${getMintPrimaryLabel(selectedMint)}`,
         `Address: ${selectedMint.mintAddress}`,
         `Run: ${selectedRun.runId}`,
         `Status: ${selectedRun.status}`,
+        `Total Amount: ${selectedRun.totalAmount}`,
         `Wallets: ${selectedRun.walletCount}`,
         `Network: ${getNetworkLabel(selectedRun.network)}`,
         `RPC: ${selectedRun.rpcUrl || 'Automatic'}`,
@@ -1651,7 +1996,11 @@ async function startBrowseRunsFlow(ctx, mintAddress) {
     ctx.session.browseState.mints = await listMintSummaries();
 
     if (!ctx.session.browseState.mints.length) {
-        await renderPanel(ctx, 'No saved mints found.', [
+        await renderPanel(ctx, [
+            formatBanner('Runs Select Mint'),
+            '',
+            'No saved mints found.'
+        ].join('\n'), [
             [Markup.button.callback('🏠 Main Menu', 'menu:main')]
         ]);
         return;
@@ -1705,7 +2054,7 @@ async function beginMintExecution(ctx) {
     clearError(ctx);
     ctx.session.busy = true;
     await renderPanel(ctx, [
-        'Mint Starting',
+        formatBanner('Mint Starting'),
         '',
         `Mint: ${draft.mintAddress}`,
         `Total Amount: ${draft.totalAmount}`,
@@ -1796,7 +2145,7 @@ async function beginRefundExecution(ctx) {
     ctx.session.busy = true;
 
     await renderPanel(ctx, [
-        'Refund Starting',
+        formatBanner('Refund Starting'),
         '',
         `Mint: ${selectedMint.mintAddress}`,
         `Run: ${selectedRun.runId}`,
@@ -1889,7 +2238,7 @@ async function beginMintRetryExecution(ctx) {
     clearError(ctx);
     ctx.session.busy = true;
     await renderPanel(ctx, [
-        'Retry Starting',
+        formatBanner('Retry Starting'),
         '',
         `Mint: ${selectedMint.mintAddress}`,
         `Run: ${selectedRun.runId}`,
@@ -2003,7 +2352,7 @@ async function beginTokenCreateExecution(ctx) {
     clearError(ctx);
     ctx.session.busy = true;
     await renderPanel(ctx, [
-        'Token Creation Starting',
+        formatBanner('Token Creation Starting'),
         '',
         `Name: ${draft.tokenName}`,
         `Symbol: ${draft.tokenSymbol}`,
@@ -2059,7 +2408,7 @@ async function beginAdditionalMintExecution(ctx) {
     clearError(ctx);
     ctx.session.busy = true;
     await renderPanel(ctx, [
-        'Additional Mint Starting',
+        formatBanner('Additional Mint Starting'),
         '',
         `Token: ${getMintPrimaryLabel(selectedToken)}`,
         `Mint Address: ${selectedToken.mintAddress}`,
@@ -2098,7 +2447,7 @@ async function beginAuthorityRevokeExecution(ctx, authorityKind) {
     clearError(ctx);
     ctx.session.busy = true;
     await renderPanel(ctx, [
-        `${authorityLabel} Authority Revoke Starting`,
+        formatBanner(`${authorityLabel} Authority Revoke Starting`),
         '',
         `Token: ${getMintPrimaryLabel(selectedToken)}`,
         `Mint Address: ${selectedToken.mintAddress}`,
@@ -2147,7 +2496,7 @@ async function beginCreatedTokenMintRetryExecution(ctx) {
     clearError(ctx);
     ctx.session.busy = true;
     await renderPanel(ctx, [
-        'Retry Starting',
+        formatBanner('Retry Starting'),
         '',
         `Mint: ${selectedToken.mintAddress}`,
         `Run: ${selectedRun.runId}`,
@@ -2290,6 +2639,82 @@ async function handleAdditionalMintTextInput(ctx, text) {
     }
 }
 
+async function handlePoolTextInput(ctx, text) {
+    const poolState = ctx.session.poolState;
+
+    if (!poolState?.draft || !ctx.session.editField) {
+        await ctx.reply('Use the pool tiles to choose what to edit.');
+        return;
+    }
+
+    try {
+        const nextValue = validatePoolDraftField(ctx.session.editField, text);
+        poolState.draft[ctx.session.editField] = nextValue;
+        ctx.session.editField = null;
+        clearError(ctx);
+        await renderPoolCard(ctx);
+    } catch (error) {
+        setError(ctx, error.message);
+        await renderPoolCard(ctx);
+    }
+}
+
+async function beginPoolCreateExecution(ctx) {
+    const draft = ctx.session.poolState?.draft || createPoolDraft();
+    const invalidFields = getPoolDraftErrors(draft);
+
+    if (invalidFields.length) {
+        setError(ctx, `Fix these fields before creating the pool: ${invalidFields.join(', ')}`);
+        await renderPoolCard(ctx);
+        return;
+    }
+
+    clearError(ctx);
+    ctx.session.busy = true;
+    await renderPanel(ctx, [
+        formatBanner('DAMM Pool Starting'),
+        '',
+        `🌐 Network: ${getNetworkLabel(draft.network)}`,
+        `🪙 Token: ${getTokenDisplay(draft) || draft.tokenMintAddress}`,
+        `◎ SOL Amount: ${draft.solAmount}`,
+        `🪙 Token Amount: ${draft.tokenAmount}`,
+        '',
+        'Creating the DAMM v2 pool and initial LP position on-chain now.'
+    ].join('\n'), []);
+
+    try {
+        const poolRecord = await createDammPool({
+            network: draft.network,
+            tokenMintAddress: draft.tokenMintAddress,
+            solAmount: draft.solAmount,
+            tokenAmount: draft.tokenAmount
+        });
+
+        ctx.session.busy = false;
+        resetSession(ctx, { preservePanel: true });
+        await renderPanel(ctx, [
+            formatBanner('DAMM Pool Created'),
+            '',
+            `🌐 Network: ${getNetworkLabel(poolRecord.network)}`,
+            `🪙 Token: ${getTokenDisplay(poolRecord) || poolRecord.baseMint}`,
+            `🏊 Pool Address: ${poolRecord.poolAddress}`,
+            `🧾 Token Mint: ${poolRecord.baseMint}`,
+            `◎ SOL Amount: ${poolRecord.solAmount}`,
+            `🪙 Token Amount: ${poolRecord.tokenAmount}`,
+            `⚙️ Config: ${poolRecord.configAddress}`,
+            `🧮 Fee Mode: ${poolRecord.collectFeeModeLabel || poolRecord.collectFeeMode}`,
+            `✍️ Create Signature: ${poolRecord.createSignature}`,
+            `📍 Position: ${poolRecord.positionAddress}`
+        ].join('\n'), [
+            [Markup.button.callback('🏠 Main Menu', 'menu:main')]
+        ]);
+    } catch (error) {
+        ctx.session.busy = false;
+        setError(ctx, error.message);
+        await renderPoolCard(ctx);
+    }
+}
+
 async function handleMenuAction(ctx, action) {
     if (action === 'main') {
         await renderMainMenu(ctx);
@@ -2321,6 +2746,16 @@ async function handleMenuAction(ctx, action) {
         return;
     }
 
+    if (action === 'wallet') {
+        await renderWalletView(ctx);
+        return;
+    }
+
+    if (action === 'pool') {
+        await startPoolFlow(ctx);
+        return;
+    }
+
     if (action === 'runs') {
         await startBrowseRunsFlow(ctx);
         return;
@@ -2338,6 +2773,119 @@ async function handleCallback(ctx) {
     if (data.startsWith('menu:')) {
         await answerCallback(ctx);
         await handleMenuAction(ctx, data.split(':')[1]);
+        return;
+    }
+
+    if (data === 'wallet:address') {
+        await answerCallback(ctx, 'Address sent.');
+        await ctx.reply(getAuthorityPublicKey().toBase58());
+        await renderWalletView(ctx);
+        return;
+    }
+
+    if (data === 'wallet:qr') {
+        await answerCallback(ctx, 'QR code sent.');
+        await ctx.replyWithPhoto(
+            { source: await createAuthorityFundingQrPng() },
+            { caption: getAuthorityPublicKey().toBase58() }
+        );
+        await renderWalletView(ctx);
+        return;
+    }
+
+    if (data.startsWith('pool:network:')) {
+        await answerCallback(ctx, 'Loading wallet tokens.');
+        ctx.session.flow = 'pool';
+        ctx.session.view = 'tokens';
+        ctx.session.editField = null;
+        ctx.session.poolState = createPoolState();
+        ctx.session.poolState.network = normalizeBotNetwork(data.split(':')[2]);
+
+        try {
+            ctx.session.poolState.tokens = await listHeldTokens({
+                network: ctx.session.poolState.network
+            });
+        } catch (error) {
+            setError(ctx, error.message);
+            await renderPoolNetworkPicker(ctx);
+            return;
+        }
+
+        if (!ctx.session.poolState.tokens.length) {
+            setError(ctx, 'No positive token balances were found in the bot wallet on that network.');
+            await renderPoolNetworkPicker(ctx);
+            return;
+        }
+
+        clearError(ctx);
+        await renderPoolTokenPicker(ctx);
+        return;
+    }
+
+    if (data === 'pool:back:network') {
+        await answerCallback(ctx);
+        clearError(ctx);
+        await renderPoolNetworkPicker(ctx);
+        return;
+    }
+
+    if (data.startsWith('pool:tokens:page:')) {
+        await answerCallback(ctx);
+        ctx.session.poolState.tokenPage = Number.parseInt(data.split(':')[3], 10) || 0;
+        clearError(ctx);
+        await renderPoolTokenPicker(ctx);
+        return;
+    }
+
+    if (data.startsWith('pool:token:')) {
+        await answerCallback(ctx);
+        const index = Number.parseInt(data.split(':')[2], 10);
+        const state = ctx.session.poolState;
+
+        if (!Number.isInteger(index) || !state.tokens[index]) {
+            setError(ctx, 'Selected token is no longer available.');
+            await renderPoolTokenPicker(ctx);
+            return;
+        }
+
+        const selectedToken = state.tokens[index];
+        const balances = await fetchAuthoritySolBalances().catch(() => null);
+        state.selectedTokenIndex = index;
+        state.draft = createPoolDraft({
+            network: state.network,
+            tokenMintAddress: selectedToken.mintAddress,
+            tokenName: selectedToken.tokenName || '',
+            tokenSymbol: selectedToken.tokenSymbol || '',
+            tokenDecimals: selectedToken.decimals,
+            tokenProgramId: selectedToken.programId,
+            tokenBalance: selectedToken.balance,
+            solBalance: balances?.[state.network]?.balance || 'Unavailable'
+        });
+        clearError(ctx);
+        await renderPoolCard(ctx);
+        return;
+    }
+
+    if (data === 'pool:back:tokens') {
+        await answerCallback(ctx);
+        ctx.session.editField = null;
+        clearError(ctx);
+        await renderPoolTokenPicker(ctx);
+        return;
+    }
+
+    if (data.startsWith('pool:edit:')) {
+        await answerCallback(ctx, 'Send the new value in chat.');
+        ctx.session.flow = 'pool';
+        ctx.session.editField = data.split(':')[2];
+        clearError(ctx);
+        await renderPoolCard(ctx);
+        return;
+    }
+
+    if (data === 'pool:start') {
+        await answerCallback(ctx);
+        await beginPoolCreateExecution(ctx);
         return;
     }
 
@@ -3004,6 +3552,24 @@ bot.command('tokens', async ctx => {
     await startCreatedTokensFlow(ctx);
 });
 
+bot.command('wallet', async ctx => {
+    if (ctx.session.busy) {
+        await ctx.reply('An operation is already running.');
+        return;
+    }
+
+    await renderWalletView(ctx);
+});
+
+bot.command('pool', async ctx => {
+    if (ctx.session.busy) {
+        await ctx.reply('An operation is already running.');
+        return;
+    }
+
+    await startPoolFlow(ctx);
+});
+
 bot.command('runs', async ctx => {
     if (ctx.session.busy) {
         await ctx.reply('An operation is already running.');
@@ -3039,6 +3605,11 @@ bot.on('text', async ctx => {
 
     if (ctx.session.flow === 'tokenAdditionalMint') {
         await handleAdditionalMintTextInput(ctx, ctx.message.text);
+        return;
+    }
+
+    if (ctx.session.flow === 'pool') {
+        await handlePoolTextInput(ctx, ctx.message.text);
         return;
     }
 
