@@ -2845,8 +2845,8 @@ function logUserAction(ctx, action) {
         'Unknown';
 
     const telegramId = ctx.from?.id || 'Unknown';
-
-    console.log(`${username} [${telegramId}]: ${action}`);
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${username} [${telegramId}]: ${action}`);
 }
 
 async function handleCallback(ctx) {
