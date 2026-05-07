@@ -2838,8 +2838,21 @@ async function handleMenuAction(ctx, action) {
     }
 }
 
+function logUserAction(ctx, action) {
+    const username =
+        ctx.from?.username ||
+        [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ') ||
+        'Unknown';
+
+    const telegramId = ctx.from?.id || 'Unknown';
+
+    console.log(`${username} [${telegramId}]: ${action}`);
+}
+
 async function handleCallback(ctx) {
     const data = ctx.callbackQuery.data;
+
+    logUserAction(ctx, `pressed ${data}`);
 
     if (ctx.session.busy) {
         await answerCallback(ctx, 'An operation is already running.');
