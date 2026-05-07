@@ -3721,6 +3721,7 @@ bot.on('text', async ctx => {
     console.log(`${username} [${telegramId}]: ${messageText}`);
 
     if (ctx.message.text.startsWith('/')) {
+        console.log(`${username} [${telegramId}]: ${messageText}`);
         return;
     }
 
