@@ -1,13 +1,15 @@
-const { PublicKey } = require('@solana/web3.js');
+const { PublicKey, Keypair } = require('@solana/web3.js');
 const { Telegraf, session, Markup } = require('telegraf');
-const { loadConfig } = require('./lib/config');
+const { loadConfig, parseAuthoritySecretKey } = require('./lib/config');
 const { addAllowedUserId, loadRuntimeAllowlist, removeAllowedUserId } = require('./lib/storage/allowlistStore');
+const { setRuntimeAuthorityPrivateKey } = require('./lib/storage/authorityStore');
 const { backfillMintMetadata, listMintSummaries, listRuns, loadRun } = require('./lib/storage/runStore');
 const { listTokens } = require('./lib/storage/tokenStore');
 const { executeMintRun, retryMintFailures } = require('./lib/services/mintService');
 const { executeRefundRun } = require('./lib/services/refundService');
 const { executeAdditionalMint, executeRevokeAuthority, executeTokenCreate, fetchBotWalletTokenBalance, fetchTokenAuthorityStatus } = require('./lib/services/tokenService');
 const { createDammPool, listHeldTokens } = require('./lib/services/meteoraService');
+const { uploadTokenImageToPinata, uploadTokenMetadataToPinata } = require('./lib/services/pinataService');
 const { createConnection, fetchTokenMetadata } = require('./lib/services/solana');
 const { createAuthorityFundingQrPng, fetchAuthoritySolBalances, getAuthorityPublicKey } = require('./lib/services/walletService');
 const { createProgressReporter, formatProgressBar, formatRawAmount, parseIntegerInRange, parsePositiveInteger, parsePositiveNumber, parseTokenAmountToRaw } = require('./lib/utils');
@@ -106,6 +108,8 @@ function createTokenDraft(overrides = {}) {
         tokenSymbol: '',
         decimals: DEFAULT_TOKEN_DECIMALS,
         initialMintAmount: '',
+        imageUri: '',
+        imageFileName: '',
         network: defaultNetwork,
         rpcOverride: getDefaultRpcForNetwork(defaultNetwork),
         ...overrides
@@ -727,6 +731,7 @@ function formatTokenCardText(ctx) {
         `Symbol: ${draft.tokenSymbol || 'Not set'}`,
         `Decimals: ${draft.decimals || DEFAULT_TOKEN_DECIMALS}`,
         `Initial Mint Amount: ${draft.initialMintAmount || 'Not set'}`,
+        `Token Icon: ${draft.imageUri ? `Uploaded (${draft.imageFileName || 'image'})` : 'Not set'}`,
         `Network: ${getNetworkLabel(draft.network || 'devnet')}`,
         `RPC Override: ${formatRpcOverride(draft.rpcOverride, draft.network)}`,
         ''
@@ -740,6 +745,8 @@ function formatTokenCardText(ctx) {
         lines.push('Editing Decimals: send an integer between 0 and 255.');
     } else if (ctx.session.editField === 'initialMintAmount') {
         lines.push('Editing Initial Mint Amount: send a positive number. This will be minted into the bot wallet right after token creation.');
+    } else if (ctx.session.editField === 'tokenImage') {
+        lines.push('Editing Token Icon: send a photo in chat. The bot will upload it to Pinata and attach it to token metadata.');
     } else if (ctx.session.editField === 'rpcOverride') {
         lines.push('Editing RPC Override: send a full custom RPC URL. Use the default RPC button to reset to the network default.');
     } else {
@@ -797,6 +804,9 @@ function buildTokenCardButtons(ctx) {
         [
             Markup.button.callback('🔢 Decimals', 'token:edit:decimals'),
             Markup.button.callback('💸 Initial Mint', 'token:edit:initialMintAmount')
+        ],
+        [
+            Markup.button.callback(draft.imageUri ? '🖼️ Token Icon: Ready' : '🖼️ Token Icon', 'token:edit:tokenImage')
         ],
         [
             Markup.button.callback(`🌐 Network: ${getNetworkLabel(draft.network)}`, 'token:network')
@@ -2358,6 +2368,7 @@ async function beginTokenCreateExecution(ctx) {
         `Symbol: ${draft.tokenSymbol}`,
         `Decimals: ${draft.decimals}`,
         `Initial Mint Amount: ${draft.initialMintAmount}`,
+        `Token Icon: ${draft.imageUri ? 'Uploaded' : 'Not set'}`,
         `Network: ${getNetworkLabel(draft.network)}`,
         `RPC Override: ${formatRpcOverride(draft.rpcOverride, draft.network)}`,
         '',
@@ -2365,10 +2376,21 @@ async function beginTokenCreateExecution(ctx) {
     ].join('\n'), []);
 
     try {
+        let metadataUri = '';
+        if (draft.imageUri) {
+            const metadataUpload = await uploadTokenMetadataToPinata({
+                tokenName: draft.tokenName,
+                tokenSymbol: draft.tokenSymbol,
+                imageUri: draft.imageUri
+            });
+            metadataUri = metadataUpload.metadataUri;
+        }
+
         const tokenRecord = await executeTokenCreate({
             tokenName: draft.tokenName,
             tokenSymbol: draft.tokenSymbol,
-            metadataUri: '',
+            metadataUri,
+            imageUri: draft.imageUri,
             decimals: draft.decimals,
             initialMintAmount: draft.initialMintAmount,
             connectionOptions: {
@@ -2613,6 +2635,60 @@ async function handleTokenTextInput(ctx, text) {
         ctx.session.editField = null;
         await renderTokenCard(ctx);
     } catch (error) {
+        setError(ctx, error.message);
+        await renderTokenCard(ctx);
+    }
+}
+
+async function handleTokenPhotoInput(ctx) {
+    if (ctx.session.flow !== 'tokenCreate' || ctx.session.editField !== 'tokenImage') {
+        await ctx.reply('Use the token icon tile first, then send a photo.');
+        return;
+    }
+
+    if (!config.pinataJwt) {
+        setError(ctx, 'PINATA_JWT is not configured, so token images cannot be uploaded.');
+        ctx.session.editField = null;
+        await renderTokenCard(ctx);
+        return;
+    }
+
+    const largestPhoto = [...(ctx.message.photo || [])].sort((left, right) => (right.file_size || 0) - (left.file_size || 0))[0];
+    if (!largestPhoto) {
+        setError(ctx, 'No photo was found in that message.');
+        await renderTokenCard(ctx);
+        return;
+    }
+
+    clearError(ctx);
+    ctx.session.busy = true;
+    await renderPanel(ctx, [
+        formatBanner('Uploading Token Icon'),
+        '',
+        'Uploading the token icon to Pinata now.'
+    ].join('\n'), []);
+
+    try {
+        const fileLink = await ctx.telegram.getFileLink(largestPhoto.file_id);
+        const response = await fetch(fileLink.href);
+        if (!response.ok) {
+            throw new Error(`Telegram file download failed with status ${response.status}.`);
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        const upload = await uploadTokenImageToPinata({
+            buffer: Buffer.from(arrayBuffer),
+            fileName: `${(ctx.session.tokenDraft.tokenSymbol || 'token').toLowerCase()}-icon-${Date.now()}.jpg`,
+            contentType: response.headers.get('content-type') || 'image/jpeg'
+        });
+
+        ctx.session.tokenDraft.imageUri = upload.imageUri;
+        ctx.session.tokenDraft.imageFileName = upload.fileName;
+        ctx.session.editField = null;
+        ctx.session.busy = false;
+        await renderTokenCard(ctx);
+    } catch (error) {
+        ctx.session.busy = false;
         setError(ctx, error.message);
         await renderTokenCard(ctx);
     }
@@ -2949,6 +3025,15 @@ async function handleCallback(ctx) {
         await answerCallback(ctx, 'That field is no longer used.');
         ctx.session.flow = 'tokenCreate';
         ctx.session.editField = null;
+        clearError(ctx);
+        await renderTokenCard(ctx);
+        return;
+    }
+
+    if (data === 'token:edit:tokenImage') {
+        await answerCallback(ctx, 'Send a photo in chat.');
+        ctx.session.flow = 'tokenCreate';
+        ctx.session.editField = 'tokenImage';
         clearError(ctx);
         await renderTokenCard(ctx);
         return;
@@ -3442,6 +3527,10 @@ function getRequiredNumericUserIdArgument(ctx) {
     return value;
 }
 
+function getRequiredBase58Argument(ctx) {
+    return getCommandArgument(ctx);
+}
+
 async function requireAdmin(ctx) {
     const chatId = String(ctx.chat?.id || '');
     const chatAllowed = !config.allowedChatIds.length || config.allowedChatIds.includes(chatId);
@@ -3553,12 +3642,39 @@ bot.command('tokens', async ctx => {
 });
 
 bot.command('wallet', async ctx => {
+    if (!(await requireAdmin(ctx))) {
+        return;
+    }
+
     if (ctx.session.busy) {
         await ctx.reply('An operation is already running.');
         return;
     }
 
-    await renderWalletView(ctx);
+    const nextPrivateKey = getRequiredBase58Argument(ctx);
+    if (!nextPrivateKey) {
+        await ctx.reply('Usage: /wallet <base58_private_key>');
+        return;
+    }
+
+    if (nextPrivateKey.trim().startsWith('[')) {
+        await ctx.reply('The /wallet command only accepts a base58 private key.');
+        return;
+    }
+
+    try {
+        const previousAddress = getAuthorityPublicKey().toBase58();
+        const nextSecretKey = parseAuthoritySecretKey(nextPrivateKey);
+        const nextKeypair = Keypair.fromSecretKey(nextSecretKey);
+        await setRuntimeAuthorityPrivateKey(nextPrivateKey);
+        await ctx.reply([
+            'Bot wallet updated.',
+            `Previous: ${previousAddress}`,
+            `Current: ${nextKeypair.publicKey.toBase58()}`
+        ].join('\n'));
+    } catch (error) {
+        await ctx.reply(`Invalid base58 private key: ${error.message}`);
+    }
 });
 
 bot.command('pool', async ctx => {
@@ -3583,7 +3699,27 @@ bot.on('callback_query', async ctx => {
     await handleCallback(ctx);
 });
 
+bot.on('photo', async ctx => {
+    if (ctx.session.busy) {
+        await ctx.reply('An operation is already running.');
+        return;
+    }
+
+    if (ctx.session.flow === 'tokenCreate') {
+        await handleTokenPhotoInput(ctx);
+        return;
+    }
+
+    await ctx.reply('Use the button panel to navigate. Send a photo only when the token icon field is in edit mode.');
+});
+
 bot.on('text', async ctx => {
+    const messageText = ctx.message.text;
+    const username = ctx.from?.username || ctx.from?.first_name || 'Unknown';
+    const telegramId = ctx.from?.id;
+
+    console.log(`${username} [${telegramId}]: ${messageText}`);
+
     if (ctx.message.text.startsWith('/')) {
         return;
     }
