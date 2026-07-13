@@ -67,7 +67,7 @@ function createMintDraft(overrides = {}) {
         rpcOverride: getDefaultRpcForNetwork(defaultNetwork),
         tokenName: '',
         tokenSymbol: '',
-        delayMs: 1500,
+        delayMs: config.defaultDelayMs || 1500,
         ...overrides
     };
 
@@ -87,7 +87,7 @@ function createRefundState() {
         runs: [],
         runPage: 0,
         selectedRunIndex: null,
-        delayMs: 1500
+        delayMs: config.defaultDelayMs || 1500
     };
 }
 
@@ -706,7 +706,7 @@ function formatMintCardText(ctx) {
         `Wallet Count: ${draft.walletCount || 'Not set'}`,
         `Network: ${getNetworkLabel(draft.network || 'devnet')}`,
         `RPC Override: ${formatRpcOverride(draft.rpcOverride, draft.network)}`,
-        `Delay: ${draft.delayMs !== undefined && draft.delayMs !== null ? draft.delayMs : 1500} ms`,
+        `Delay: ${draft.delayMs !== undefined && draft.delayMs !== null ? draft.delayMs : (config.defaultDelayMs || 1500)} ms`,
         ''
     ];
 
@@ -2160,7 +2160,7 @@ async function beginMintExecution(ctx) {
                 cluster: draft.network,
                 rpcUrl: draft.rpcOverride || undefined
             },
-            delayMs: draft.delayMs !== undefined && draft.delayMs !== null ? draft.delayMs : 1500,
+            delayMs: draft.delayMs !== undefined && draft.delayMs !== null ? draft.delayMs : (config.defaultDelayMs || 1500),
             onProgress: progressReporter
         });
 
