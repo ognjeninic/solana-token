@@ -20,10 +20,14 @@ async function run() {
             }
         }
 
+        const delayInput = await ask('Delay in ms between batches (leave empty for run default/1500): ');
+        const delayMs = delayInput.trim() !== '' && !Number.isNaN(Number(delayInput.trim())) ? Number(delayInput.trim()) : undefined;
+
         const runRecord = await retryMintFailures({
             mintAddress,
             runId,
             connectionOptions,
+            delayMs,
             onProgress: async progress => {
                 if (progress.current === 1 || progress.current === progress.total || progress.current % 10 === 0) {
                     console.log(`Retry progress ${progress.current}/${progress.total}: ${progress.wallet.publicKey} (${progress.wallet.status})`);

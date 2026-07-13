@@ -10,7 +10,7 @@ const { executeRefundRun, retryRefundFailures } = require('./lib/services/refund
 const { executeAdditionalMint, executeRevokeAuthority, executeTokenCreate, fetchBotWalletTokenBalance, fetchTokenAuthorityStatus } = require('./lib/services/tokenService');
 const { createDammPool, listHeldTokens } = require('./lib/services/meteoraService');
 const { uploadTokenImageToPinata, uploadTokenMetadataToPinata } = require('./lib/services/pinataService');
-const { createConnection, fetchTokenMetadata } = require('./lib/services/solana');
+const { createConnection, fetchTokenMetadata, resolveConnectionOptions } = require('./lib/services/solana');
 const { createAuthorityFundingQrPng, fetchAuthoritySolBalances, getAuthorityPublicKey } = require('./lib/services/walletService');
 const { createProgressReporter, formatProgressBar, formatRawAmount, parseIntegerInRange, parsePositiveInteger, parsePositiveNumber, parseTokenAmountToRaw } = require('./lib/utils');
 
@@ -67,6 +67,7 @@ function createMintDraft(overrides = {}) {
         rpcOverride: getDefaultRpcForNetwork(defaultNetwork),
         tokenName: '',
         tokenSymbol: '',
+        delayMs: 1500,
         ...overrides
     };
 
@@ -85,7 +86,8 @@ function createRefundState() {
         selectedMintIndex: null,
         runs: [],
         runPage: 0,
-        selectedRunIndex: null
+        selectedRunIndex: null,
+        delayMs: 1500
     };
 }
 
@@ -446,11 +448,7 @@ function getNetworkLabel(network) {
 
 function getDefaultRpcForNetwork(network) {
     const normalizedNetwork = normalizeBotNetwork(network);
-    if (normalizedNetwork === 'mainnet') {
-        return config.defaultRpcUrl || 'https://api.mainnet-beta.solana.com';
-    }
-
-    return 'https://api.devnet.solana.com';
+    return resolveConnectionOptions({ cluster: normalizedNetwork }, config).rpcUrl;
 }
 
 function formatRpcOverride(rpcOverride, network) {
@@ -578,6 +576,10 @@ function validateDraftField(field, value) {
         return trimmed;
     }
 
+    if (field === 'delayMs') {
+        return parseIntegerInRange(trimmed, 'Delay', 0, 60000);
+    }
+
     throw new Error('Unknown field.');
 }
 
@@ -641,6 +643,14 @@ function getMintDraftErrors(draft) {
         errors.push('Wallet count');
     }
 
+    try {
+        if (draft.delayMs !== undefined && draft.delayMs !== null) {
+            parseIntegerInRange(draft.delayMs, 'Delay', 0, 60000);
+        }
+    } catch (error) {
+        errors.push('Delay');
+    }
+
     if (!NETWORKS.includes(draft.network)) {
         errors.push('Network');
     }
@@ -696,6 +706,7 @@ function formatMintCardText(ctx) {
         `Wallet Count: ${draft.walletCount || 'Not set'}`,
         `Network: ${getNetworkLabel(draft.network || 'devnet')}`,
         `RPC Override: ${formatRpcOverride(draft.rpcOverride, draft.network)}`,
+        `Delay: ${draft.delayMs !== undefined && draft.delayMs !== null ? draft.delayMs : 1500} ms`,
         ''
     ];
 
@@ -707,6 +718,8 @@ function formatMintCardText(ctx) {
         lines.push('Editing Wallet Count: send a positive integer.');
     } else if (ctx.session.editField === 'rpcOverride') {
         lines.push('Editing RPC Override: send a full custom RPC URL. Use the default RPC button to reset to the network default.');
+    } else if (ctx.session.editField === 'delayMs') {
+        lines.push('Editing Delay: send the delay between wallet mints in milliseconds (0 to 60000).');
     } else {
         lines.push('Tap a tile to edit a field, or start minting when the card looks correct.');
     }
@@ -786,6 +799,9 @@ function buildMintCardButtons(ctx) {
         ],
         [
             Markup.button.callback('🔧 RPC Override', 'mint:edit:rpcOverride'),
+            Markup.button.callback('⏱️ Delay', 'mint:edit:delayMs')
+        ],
+        [
             Markup.button.callback('♻️ Use Default RPC', 'mint:rpc:default')
         ],
         [
@@ -2144,6 +2160,7 @@ async function beginMintExecution(ctx) {
                 cluster: draft.network,
                 rpcUrl: draft.rpcOverride || undefined
             },
+            delayMs: draft.delayMs !== undefined && draft.delayMs !== null ? draft.delayMs : 1500,
             onProgress: progressReporter
         });
 
@@ -2226,6 +2243,7 @@ async function beginRefundExecution(ctx) {
         const runRecord = await executeRefundRun({
             mintAddress: selectedMint.mintAddress,
             runId: selectedRun.runId,
+            delayMs: state.delayMs !== undefined && state.delayMs !== null ? state.delayMs : (selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500),
             onProgress: progressReporter
         });
 
@@ -2324,6 +2342,7 @@ async function beginRefundRetryExecution(ctx) {
                 cluster: selectedRun.network,
                 rpcUrl: selectedRun.rpcUrl || undefined
             },
+            delayMs: state.delayMs !== undefined && state.delayMs !== null ? state.delayMs : (selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500),
             onProgress: progressReporter
         });
         const remainingRetryableCount = countRetryableRefundWallets(runRecord);
@@ -2424,6 +2443,7 @@ async function beginMintRetryExecution(ctx) {
                 cluster: selectedRun.network,
                 rpcUrl: selectedRun.rpcUrl || undefined
             },
+            delayMs: selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500,
             onProgress: progressReporter
         });
         const remainingRetryableCount = countRetryableWallets(runRecord);
@@ -2695,6 +2715,7 @@ async function beginCreatedTokenMintRetryExecution(ctx) {
                 cluster: selectedRun.network,
                 rpcUrl: selectedRun.rpcUrl || undefined
             },
+            delayMs: selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500,
             onProgress: progressReporter
         });
         const remainingRetryableCount = countRetryableWallets(runRecord);
@@ -2791,6 +2812,7 @@ async function beginCreatedTokenRefundRetryExecution(ctx) {
                 cluster: selectedRun.network,
                 rpcUrl: selectedRun.rpcUrl || undefined
             },
+            delayMs: state.delayMs !== undefined && state.delayMs !== null ? state.delayMs : (selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500),
             onProgress: progressReporter
         });
         const remainingRetryableCount = countRetryableRefundWallets(runRecord);
@@ -2847,6 +2869,28 @@ async function handleMintTextInput(ctx, text) {
     } catch (error) {
         setError(ctx, error.message);
         await renderMintCard(ctx);
+    }
+}
+
+async function handleRefundTextInput(ctx, text) {
+    if (!ctx.session.editField) {
+        await ctx.reply('Use the buttons on the refund card to choose what to edit.');
+        return;
+    }
+
+    if (ctx.session.editField === 'delayMs') {
+        try {
+            const parsed = parseIntegerInRange(text.trim(), 'Delay', 0, 60000);
+            ctx.session.refundState.delayMs = parsed;
+            clearError(ctx);
+            ctx.session.editField = null;
+            await renderRefundConfirm(ctx);
+        } catch (error) {
+            setError(ctx, error.message);
+            await renderRefundConfirm(ctx);
+        }
+    } else {
+        await ctx.reply('Unknown refund edit field.');
     }
 }
 
@@ -4008,6 +4052,11 @@ bot.on('text', async ctx => {
 
     if (ctx.session.flow === 'pool') {
         await handlePoolTextInput(ctx, ctx.message.text);
+        return;
+    }
+
+    if (ctx.session.flow === 'refund') {
+        await handleRefundTextInput(ctx, ctx.message.text);
         return;
     }
 
