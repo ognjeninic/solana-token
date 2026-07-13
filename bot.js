@@ -1428,6 +1428,27 @@ async function updateOperationProgress(ctx, snapshot) {
     await renderProgressMessage(ctx, text, snapshot);
 }
 
+async function sendMonitorAlert(ctx, title, details = []) {
+    const monitorChatIds = config.monitorChatIds || [];
+    if (!monitorChatIds.length || !ctx || !ctx.telegram) {
+        return;
+    }
+
+    const messageText = [
+        `🚨 [MONITOR LOG] ${title}`,
+        '',
+        ...details
+    ].join('\n');
+
+    for (const chatId of monitorChatIds) {
+        try {
+            await ctx.telegram.sendMessage(chatId, messageText);
+        } catch (error) {
+            console.error(`Failed to send monitor alert to ${chatId}: ${error.message}`);
+        }
+    }
+}
+
 async function startMintFlow(ctx, options = {}) {
     resetSession(ctx);
     ctx.session.flow = 'mint';
@@ -2188,6 +2209,14 @@ async function beginMintExecution(ctx) {
         });
 
         ctx.session.busy = false;
+        await sendMonitorAlert(ctx, `SUCCESS: Batch Mint Completed (${runRecord.status})`, [
+            `Mint Address: ${runRecord.mintAddress}`,
+            `Run ID: ${runRecord.runId}`,
+            `Wallets Minted: ${runRecord.walletCount}`,
+            `Total Tokens: ${runRecord.totalAmount}`,
+            `Failures: ${runRecord.failures.length}`,
+            `Network: ${getNetworkLabel(draft.network)}`
+        ]);
         await updateOperationProgress(ctx, {
             kind: 'mint',
             phase: 'completed',
@@ -2203,6 +2232,12 @@ async function beginMintExecution(ctx) {
         await renderMainMenu(ctx, 'Mint completed. Back at the main menu.');
     } catch (error) {
         ctx.session.busy = false;
+        await sendMonitorAlert(ctx, 'FAILURE: Batch Mint Failed', [
+            `Mint Address: ${draft.mintAddress}`,
+            `Wallets Target: ${draft.walletCount}`,
+            `Network: ${getNetworkLabel(draft.network)}`,
+            `Error: ${error.message}`
+        ]);
         await updateOperationProgress(ctx, {
             kind: 'mint',
             phase: 'failed',
@@ -2271,6 +2306,13 @@ async function beginRefundExecution(ctx) {
         });
 
         ctx.session.busy = false;
+        await sendMonitorAlert(ctx, `SUCCESS: Multi-Refund Completed (${runRecord.status})`, [
+            `Mint Address: ${runRecord.mintAddress}`,
+            `Run ID: ${runRecord.runId}`,
+            `Wallets Swept: ${runRecord.walletCount}`,
+            `Total Tokens Reclaimed: ${runRecord.totalAmount}`,
+            `Failures: ${runRecord.failures.length}`
+        ]);
         await updateOperationProgress(ctx, {
             kind: 'refund',
             phase: 'completed',
@@ -2286,6 +2328,11 @@ async function beginRefundExecution(ctx) {
         await renderMainMenu(ctx, 'Refund completed. Back at the main menu.');
     } catch (error) {
         ctx.session.busy = false;
+        await sendMonitorAlert(ctx, 'FAILURE: Multi-Refund Failed', [
+            `Mint Address: ${selectedMint?.mintAddress || 'N/A'}`,
+            `Run ID: ${selectedRun?.runId || 'N/A'}`,
+            `Error: ${error.message}`
+        ]);
         await updateOperationProgress(ctx, {
             kind: 'refund',
             phase: 'failed',
@@ -2579,12 +2626,25 @@ async function beginTokenCreateExecution(ctx) {
         });
 
         ctx.session.busy = false;
+        await sendMonitorAlert(ctx, 'SUCCESS: Token Created', [
+            `Name: ${tokenRecord.tokenName} (${tokenRecord.tokenSymbol})`,
+            `Mint Address: ${tokenRecord.mintAddress}`,
+            `Decimals: ${tokenRecord.decimals}`,
+            `Initial Mint: ${tokenRecord.initialMintAmount}`,
+            `Network: ${getNetworkLabel(tokenRecord.network || draft.network)}`,
+            `Metadata URI: ${tokenRecord.metadataUri}`
+        ]);
         await startCreatedTokensFlow(ctx, {
             selectedMintAddress: tokenRecord.mintAddress,
             introText: `Token created successfully. Minted ${tokenRecord.initialMintAmount} into the bot wallet.`
         });
     } catch (error) {
         ctx.session.busy = false;
+        await sendMonitorAlert(ctx, 'FAILURE: Token Creation Failed', [
+            `Name: ${draft.tokenName} (${draft.tokenSymbol})`,
+            `Network: ${getNetworkLabel(draft.network)}`,
+            `Error: ${error.message}`
+        ]);
         if (!ctx.session.tokenDraft) {
             ctx.session.tokenDraft = draftSnapshot;
         }
@@ -3098,6 +3158,15 @@ async function beginPoolCreateExecution(ctx) {
         });
 
         ctx.session.busy = false;
+        await sendMonitorAlert(ctx, 'SUCCESS: DAMM Pool Created', [
+            `Network: ${getNetworkLabel(poolRecord.network)}`,
+            `Token Mint: ${poolRecord.baseMint}`,
+            `Pool Address: ${poolRecord.poolAddress}`,
+            `SOL Amount: ${poolRecord.solAmount}`,
+            `Token Amount: ${poolRecord.tokenAmount}`,
+            `Create Signature: ${poolRecord.createSignature}`,
+            `Meteora URL: ${poolRecord.meteoraUrl || `https://app.meteora.ag/pools/${poolRecord.poolAddress}`}`
+        ]);
         resetSession(ctx, { preservePanel: true });
         await renderPanel(ctx, [
             formatBanner('DAMM Pool Created'),
@@ -3119,6 +3188,13 @@ async function beginPoolCreateExecution(ctx) {
         ]);
     } catch (error) {
         ctx.session.busy = false;
+        await sendMonitorAlert(ctx, 'FAILURE: DAMM Pool Creation Failed', [
+            `Network: ${getNetworkLabel(draft.network)}`,
+            `Token Mint: ${draft.tokenMintAddress}`,
+            `SOL Amount: ${draft.solAmount}`,
+            `Token Amount: ${draft.tokenAmount}`,
+            `Error: ${error.message}`
+        ]);
         setError(ctx, error.message);
         await renderPoolCard(ctx);
     }
