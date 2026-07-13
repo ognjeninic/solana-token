@@ -1291,6 +1291,9 @@ async function renderWalletView(ctx, introText) {
             Markup.button.callback('📷 QR Code', 'wallet:qr')
         ],
         [
+            Markup.button.callback('🔑 Swap Private Key', 'wallet:swap')
+        ],
+        [
             Markup.button.callback('🏠 Main Menu', 'menu:main')
         ]
     ]);
@@ -2936,6 +2939,38 @@ async function handleTokenTextInput(ctx, text) {
     }
 }
 
+async function handleWalletTextInput(ctx, text) {
+    if (ctx.session.editField !== 'privateKey') {
+        await ctx.reply('Use the buttons on the wallet view to choose an action.');
+        return;
+    }
+
+    try {
+        try {
+            await ctx.deleteMessage();
+        } catch (err) {
+            // Ignore if bot lacks delete permission
+        }
+
+        const previousAddress = getAuthorityPublicKey().toBase58();
+        const nextSecretKey = parseAuthoritySecretKey(text);
+        const nextKeypair = Keypair.fromSecretKey(nextSecretKey);
+        await setRuntimeAuthorityPrivateKey(text.trim());
+
+        ctx.session.editField = null;
+        await ctx.reply([
+            '✅ Bot wallet successfully updated!',
+            `Previous: ${previousAddress}`,
+            `Current: ${nextKeypair.publicKey.toBase58()}`
+        ].join('\n'));
+        await renderWalletView(ctx);
+    } catch (error) {
+        ctx.session.editField = null;
+        await ctx.reply(`❌ Invalid private key format: ${error.message}`);
+        await renderWalletView(ctx);
+    }
+}
+
 async function handleTokenPhotoInput(ctx) {
     if (ctx.session.flow !== 'tokenCreate' || ctx.session.editField !== 'tokenImage') {
         await ctx.reply('Use the token icon tile first, then send a photo.');
@@ -3177,6 +3212,14 @@ async function handleCallback(ctx) {
             { caption: getAuthorityPublicKey().toBase58() }
         );
         await renderWalletView(ctx);
+        return;
+    }
+
+    if (data === 'wallet:swap') {
+        await answerCallback(ctx, 'Send new private key in chat.');
+        ctx.session.flow = 'wallet';
+        ctx.session.editField = 'privateKey';
+        await ctx.reply('Send the new base58 private key or JSON byte array (`[12, 34, ...]\`) in chat right now. Your message will be automatically deleted as soon as the bot reads it for your safety.');
         return;
     }
 
@@ -3971,7 +4014,8 @@ bot.command('tokens', async ctx => {
 });
 
 bot.command('wallet', async ctx => {
-    if (!(await requireAdmin(ctx))) {
+    if (!isAuthorized(ctx)) {
+        await ctx.reply('Unauthorized.');
         return;
     }
 
@@ -3982,27 +4026,28 @@ bot.command('wallet', async ctx => {
 
     const nextPrivateKey = getRequiredBase58Argument(ctx);
     if (!nextPrivateKey) {
-        await ctx.reply('Usage: /wallet <base58_private_key>');
-        return;
-    }
-
-    if (nextPrivateKey.trim().startsWith('[')) {
-        await ctx.reply('The /wallet command only accepts a base58 private key.');
+        await renderWalletView(ctx);
         return;
     }
 
     try {
+        try {
+            await ctx.deleteMessage();
+        } catch (err) {
+            // Ignore if bot lacks delete permission
+        }
+
         const previousAddress = getAuthorityPublicKey().toBase58();
         const nextSecretKey = parseAuthoritySecretKey(nextPrivateKey);
         const nextKeypair = Keypair.fromSecretKey(nextSecretKey);
-        await setRuntimeAuthorityPrivateKey(nextPrivateKey);
+        await setRuntimeAuthorityPrivateKey(nextPrivateKey.trim());
         await ctx.reply([
-            'Bot wallet updated.',
+            '✅ Bot wallet updated.',
             `Previous: ${previousAddress}`,
             `Current: ${nextKeypair.publicKey.toBase58()}`
         ].join('\n'));
     } catch (error) {
-        await ctx.reply(`Invalid base58 private key: ${error.message}`);
+        await ctx.reply(`❌ Invalid private key: ${error.message}`);
     }
 });
 
