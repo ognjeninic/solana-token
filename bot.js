@@ -109,6 +109,8 @@ function createTokenDraft(overrides = {}) {
     const draft = {
         tokenName: '',
         tokenSymbol: '',
+        description: '',
+        twitter: '',
         decimals: DEFAULT_TOKEN_DECIMALS,
         initialMintAmount: '',
         imageUri: '',
@@ -619,6 +621,14 @@ function validateTokenDraftField(field, value) {
         return trimmed;
     }
 
+    if (field === 'description') {
+        return trimmed;
+    }
+
+    if (field === 'twitter') {
+        return trimmed;
+    }
+
     throw new Error('Unknown field.');
 }
 
@@ -749,6 +759,8 @@ function formatTokenCardText(ctx) {
         `Symbol: ${draft.tokenSymbol || 'Not set'}`,
         `Decimals: ${draft.decimals || DEFAULT_TOKEN_DECIMALS}`,
         `Initial Mint Amount: ${draft.initialMintAmount || 'Not set'}`,
+        `Description: ${draft.description || 'Not set (default used)'}`,
+        `Twitter (X): ${draft.twitter || 'Not set'}`,
         `Token Icon: ${draft.imageUri ? `Uploaded (${draft.imageFileName || 'image'})` : 'Not set'}`,
         `Network: ${getNetworkLabel(draft.network || 'devnet')}`,
         `RPC Override: ${formatRpcOverride(draft.rpcOverride, draft.network)}`,
@@ -763,6 +775,10 @@ function formatTokenCardText(ctx) {
         lines.push('Editing Decimals: send an integer between 0 and 255.');
     } else if (ctx.session.editField === 'initialMintAmount') {
         lines.push('Editing Initial Mint Amount: send a positive number. This will be minted into the bot wallet right after token creation.');
+    } else if (ctx.session.editField === 'description') {
+        lines.push('Editing Description: send a brief bio or description for your token.');
+    } else if (ctx.session.editField === 'twitter') {
+        lines.push('Editing Twitter (X): send your token Twitter/X link (e.g., https://x.com/yourtoken).');
     } else if (ctx.session.editField === 'tokenImage') {
         lines.push('Editing Token Icon: send a photo in chat. The bot will upload it to Pinata and attach it to token metadata.');
     } else if (ctx.session.editField === 'rpcOverride') {
@@ -825,6 +841,10 @@ function buildTokenCardButtons(ctx) {
         [
             Markup.button.callback('🔢 Decimals', 'token:edit:decimals'),
             Markup.button.callback('💸 Initial Mint', 'token:edit:initialMintAmount')
+        ],
+        [
+            Markup.button.callback('📝 Description', 'token:edit:description'),
+            Markup.button.callback('🐦 Twitter / X', 'token:edit:twitter')
         ],
         [
             Markup.button.callback(draft.imageUri ? '🖼️ Token Icon: Ready' : '🖼️ Token Icon', 'token:edit:tokenImage')
@@ -2519,6 +2539,8 @@ async function beginTokenCreateExecution(ctx) {
         `Symbol: ${draft.tokenSymbol}`,
         `Decimals: ${draft.decimals}`,
         `Initial Mint Amount: ${draft.initialMintAmount}`,
+        `Description: ${draft.description || 'Default'}`,
+        `Twitter (X): ${draft.twitter || 'None'}`,
         `Token Icon: ${draft.imageUri ? 'Uploaded' : 'Not set'}`,
         `Network: ${getNetworkLabel(draft.network)}`,
         `RPC Override: ${formatRpcOverride(draft.rpcOverride, draft.network)}`,
@@ -2534,7 +2556,9 @@ async function beginTokenCreateExecution(ctx) {
         const metadataUpload = await uploadTokenMetadataToPinata({
             tokenName: draft.tokenName,
             tokenSymbol: draft.tokenSymbol,
-            imageUri: draft.imageUri
+            imageUri: draft.imageUri,
+            description: draft.description,
+            twitter: draft.twitter
         });
         const metadataUri = metadataUpload.metadataUri;
 
