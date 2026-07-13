@@ -3008,7 +3008,9 @@ async function beginPoolCreateExecution(ctx) {
             `⚙️ Config: ${poolRecord.configAddress}`,
             `🧮 Fee Mode: ${poolRecord.collectFeeModeLabel || poolRecord.collectFeeMode}`,
             `✍️ Create Signature: ${poolRecord.createSignature}`,
-            `📍 Position: ${poolRecord.positionAddress}`
+            `📍 Position Address: ${poolRecord.positionAddress}`,
+            `🎫 Position NFT Mint: ${poolRecord.positionNftMint || 'N/A'}`,
+            `🔗 Meteora URL: ${poolRecord.meteoraUrl || `https://app.meteora.ag/pools/${poolRecord.poolAddress}`}`
         ].join('\n'), [
             [Markup.button.callback('🏠 Main Menu', 'menu:main')]
         ]);
