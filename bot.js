@@ -6,7 +6,7 @@ const { setRuntimeAuthorityPrivateKey } = require('./lib/storage/authorityStore'
 const { backfillMintMetadata, listMintSummaries, listRuns, loadRun } = require('./lib/storage/runStore');
 const { listTokens } = require('./lib/storage/tokenStore');
 const { executeMintRun, retryMintFailures } = require('./lib/services/mintService');
-const { executeRefundRun } = require('./lib/services/refundService');
+const { executeRefundRun, retryRefundFailures } = require('./lib/services/refundService');
 const { executeAdditionalMint, executeRevokeAuthority, executeTokenCreate, fetchBotWalletTokenBalance, fetchTokenAuthorityStatus } = require('./lib/services/tokenService');
 const { createDammPool, listHeldTokens } = require('./lib/services/meteoraService');
 const { uploadTokenImageToPinata, uploadTokenMetadataToPinata } = require('./lib/services/pinataService');
@@ -25,6 +25,7 @@ const DEFAULT_WALLET_COUNT = '10';
 const DEFAULT_TOKEN_DECIMALS = '6';
 const NETWORKS = ['devnet', 'mainnet'];
 const RETRYABLE_MINT_STATUSES = new Set(['pending', 'mint-failed', 'mint-retry-failed']);
+const RETRYABLE_REFUND_STATUSES = new Set(['pending', 'refund-failed', 'refund-retry-failed']);
 
 function createDefaultSession() {
     return {
@@ -659,6 +660,10 @@ function getTokenDraftErrors(draft) {
         errors.push('Token symbol');
     }
 
+    if (!String(source.imageUri || '').trim()) {
+        errors.push('Token icon');
+    }
+
     try {
         parseIntegerInRange(source.decimals, 'Decimals', 0, 255);
     } catch (error) {
@@ -1060,6 +1065,12 @@ function getCreatedTokenTotals(token, runs = []) {
 function countRetryableWallets(run) {
     return Array.isArray(run?.wallets)
         ? run.wallets.filter(wallet => RETRYABLE_MINT_STATUSES.has(wallet.status)).length
+        : 0;
+}
+
+function countRetryableRefundWallets(run) {
+    return Array.isArray(run?.wallets)
+        ? run.wallets.filter(wallet => RETRYABLE_REFUND_STATUSES.has(wallet.status)).length
         : 0;
 }
 
@@ -1702,6 +1713,13 @@ async function renderCreatedTokenRunDetail(ctx) {
         ]);
     }
 
+    const retryableRefundCount = countRetryableRefundWallets(selectedRun);
+    if (retryableRefundCount > 0) {
+        rows.push([
+            Markup.button.callback(`🔄 Retry Refund Failures (${retryableRefundCount})`, 'tokens:runs:retryRefund')
+        ]);
+    }
+
     rows.push(
         [
             Markup.button.callback('⬅️ Back', 'tokens:runs:back')
@@ -1814,11 +1832,17 @@ async function renderRefundConfirm(ctx) {
         lines.push(`Error: ${ctx.session.error}`);
     }
 
+    const retryableRefundCount = countRetryableRefundWallets(selectedRun);
+    const actionButtons = [
+        Markup.button.callback('↩️ Start Refund', 'refund:start'),
+        Markup.button.callback('⬅️ Back', 'refund:back:runs')
+    ];
+    if (retryableRefundCount > 0) {
+        actionButtons.splice(1, 0, Markup.button.callback(`🔄 Retry Refund (${retryableRefundCount})`, 'refund:retry'));
+    }
+
     await renderPanel(ctx, lines.join('\n'), [
-        [
-            Markup.button.callback('↩️ Start Refund', 'refund:start'),
-            Markup.button.callback('⬅️ Back', 'refund:back:runs')
-        ],
+        actionButtons,
         [
             Markup.button.callback('🏠 Main Menu', 'menu:main')
         ]
@@ -1983,6 +2007,13 @@ async function renderBrowseRunDetail(ctx) {
     if (retryableWalletCount > 0) {
         rows.push([
             Markup.button.callback(`🔁 Retry Failed (${retryableWalletCount})`, 'browse:runs:retry')
+        ]);
+    }
+
+    const retryableRefundCount = countRetryableRefundWallets(selectedRun);
+    if (retryableRefundCount > 0) {
+        rows.push([
+            Markup.button.callback(`🔄 Retry Refund Failures (${retryableRefundCount})`, 'browse:runs:retryRefund')
         ]);
     }
 
@@ -2230,6 +2261,106 @@ async function beginRefundExecution(ctx) {
     }
 }
 
+async function beginRefundRetryExecution(ctx) {
+    const state = ctx.session.refundState || ctx.session.browseState;
+    const selectedMint = state.mints[state.selectedMintIndex];
+    const selectedRun = state.runs[state.selectedRunIndex];
+    const retryableWalletCount = countRetryableRefundWallets(selectedRun);
+
+    if (!retryableWalletCount) {
+        setError(ctx, 'This run has no failed refund wallets left to retry.');
+        if (ctx.session.flow === 'browse') {
+            await renderBrowseRunDetail(ctx);
+        } else {
+            await renderRefundCard(ctx);
+        }
+        return;
+    }
+
+    clearError(ctx);
+    ctx.session.busy = true;
+    await renderPanel(ctx, [
+        formatBanner('Refund Retry Starting'),
+        '',
+        `Mint: ${selectedMint.mintAddress}`,
+        `Run: ${selectedRun.runId}`,
+        `Wallets to Retry: ${retryableWalletCount}`,
+        '',
+        'Progress is shown below in a single live message.'
+    ].join('\n'), []);
+
+    await updateOperationProgress(ctx, {
+        kind: 'refund',
+        phase: 'starting',
+        current: 0,
+        total: retryableWalletCount,
+        details: [
+            `Mint: ${selectedMint.mintAddress}`,
+            `Run: ${selectedRun.runId}`
+        ]
+    });
+
+    const progressReporter = createProgressReporter(
+        progress => updateOperationProgress(ctx, {
+            kind: 'refund',
+            phase: 'running',
+            current: progress.current,
+            total: progress.total,
+            latestWallet: progress.wallet,
+            details: [
+                `Mint: ${selectedMint.mintAddress}`,
+                `Run: ${selectedRun.runId}`
+            ]
+        }),
+        retryableWalletCount,
+        25
+    );
+
+    try {
+        const runRecord = await retryRefundFailures({
+            mintAddress: selectedMint.mintAddress,
+            runId: selectedRun.runId,
+            connectionOptions: {
+                cluster: selectedRun.network,
+                rpcUrl: selectedRun.rpcUrl || undefined
+            },
+            onProgress: progressReporter
+        });
+        const remainingRetryableCount = countRetryableRefundWallets(runRecord);
+
+        state.runs[state.selectedRunIndex] = runRecord;
+        ctx.session.busy = false;
+        await updateOperationProgress(ctx, {
+            kind: 'refund',
+            phase: 'completed',
+            current: retryableWalletCount,
+            total: retryableWalletCount,
+            latestWallet: runRecord.wallets[runRecord.wallets.length - 1] || null,
+            details: [
+                `Mint: ${runRecord.mintAddress}`,
+                `Run: ${runRecord.runId}`
+            ],
+            summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
+        });
+        await renderMainMenu(ctx, 'Refund retry completed. Back at the main menu.');
+    } catch (error) {
+        ctx.session.busy = false;
+        await updateOperationProgress(ctx, {
+            kind: 'refund',
+            phase: 'failed',
+            current: 0,
+            total: retryableWalletCount,
+            details: [
+                `Mint: ${selectedMint.mintAddress}`,
+                `Run: ${selectedRun.runId}`
+            ],
+            summary: 'Result: failed',
+            error: error.message
+        });
+        await renderMainMenu(ctx, 'Refund retry failed. Back at the main menu.');
+    }
+}
+
 async function beginMintRetryExecution(ctx) {
     const state = ctx.session.browseState;
     const selectedMint = state.mints[state.selectedMintIndex];
@@ -2376,15 +2507,16 @@ async function beginTokenCreateExecution(ctx) {
     ].join('\n'), []);
 
     try {
-        let metadataUri = '';
-        if (draft.imageUri) {
-            const metadataUpload = await uploadTokenMetadataToPinata({
-                tokenName: draft.tokenName,
-                tokenSymbol: draft.tokenSymbol,
-                imageUri: draft.imageUri
-            });
-            metadataUri = metadataUpload.metadataUri;
+        if (!draft.imageUri) {
+            throw new Error('Token icon is required before creating a token.');
         }
+
+        const metadataUpload = await uploadTokenMetadataToPinata({
+            tokenName: draft.tokenName,
+            tokenSymbol: draft.tokenSymbol,
+            imageUri: draft.imageUri
+        });
+        const metadataUri = metadataUpload.metadataUri;
 
         const tokenRecord = await executeTokenCreate({
             tokenName: draft.tokenName,
@@ -2597,6 +2729,102 @@ async function beginCreatedTokenMintRetryExecution(ctx) {
             error: error.message
         });
         await renderMainMenu(ctx, 'Retry failed. Back at the main menu.');
+    }
+}
+
+async function beginCreatedTokenRefundRetryExecution(ctx) {
+    const state = ctx.session.createdTokenState;
+    const selectedToken = state.tokens[state.selectedTokenIndex];
+    const selectedRun = state.runs[state.selectedRunIndex];
+    const retryableWalletCount = countRetryableRefundWallets(selectedRun);
+
+    if (!retryableWalletCount) {
+        setError(ctx, 'This run has no failed refund wallets left to retry.');
+        await renderCreatedTokenRunDetail(ctx);
+        return;
+    }
+
+    clearError(ctx);
+    ctx.session.busy = true;
+    await renderPanel(ctx, [
+        formatBanner('Refund Retry Starting'),
+        '',
+        `Token: ${getMintPrimaryLabel(selectedToken)}`,
+        `Run: ${selectedRun.runId}`,
+        `Wallets to Retry: ${retryableWalletCount}`,
+        '',
+        'Progress is shown below in a single live message.'
+    ].join('\n'), []);
+
+    await updateOperationProgress(ctx, {
+        kind: 'refund',
+        phase: 'starting',
+        current: 0,
+        total: retryableWalletCount,
+        details: [
+            `Mint: ${selectedToken.mintAddress}`,
+            `Run: ${selectedRun.runId}`
+        ]
+    });
+
+    const progressReporter = createProgressReporter(
+        progress => updateOperationProgress(ctx, {
+            kind: 'refund',
+            phase: 'running',
+            current: progress.current,
+            total: progress.total,
+            latestWallet: progress.wallet,
+            details: [
+                `Mint: ${selectedToken.mintAddress}`,
+                `Run: ${selectedRun.runId}`
+            ]
+        }),
+        retryableWalletCount,
+        25
+    );
+
+    try {
+        const runRecord = await retryRefundFailures({
+            mintAddress: selectedToken.mintAddress,
+            runId: selectedRun.runId,
+            connectionOptions: {
+                cluster: selectedRun.network,
+                rpcUrl: selectedRun.rpcUrl || undefined
+            },
+            onProgress: progressReporter
+        });
+        const remainingRetryableCount = countRetryableRefundWallets(runRecord);
+
+        state.runs[state.selectedRunIndex] = runRecord;
+        ctx.session.busy = false;
+        await updateOperationProgress(ctx, {
+            kind: 'refund',
+            phase: 'completed',
+            current: retryableWalletCount,
+            total: retryableWalletCount,
+            latestWallet: runRecord.wallets[runRecord.wallets.length - 1] || null,
+            details: [
+                `Mint: ${runRecord.mintAddress}`,
+                `Run: ${runRecord.runId}`
+            ],
+            summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
+        });
+        await renderMainMenu(ctx, 'Refund retry completed. Back at the main menu.');
+    } catch (error) {
+        ctx.session.busy = false;
+        await updateOperationProgress(ctx, {
+            kind: 'refund',
+            phase: 'failed',
+            current: 0,
+            total: retryableWalletCount,
+            details: [
+                `Mint: ${selectedToken.mintAddress}`,
+                `Run: ${selectedRun.runId}`
+            ],
+            summary: 'Result: failed',
+            error: error.message
+        });
+        await renderMainMenu(ctx, 'Refund retry failed. Back at the main menu.');
     }
 }
 
@@ -3183,6 +3411,12 @@ async function handleCallback(ctx) {
         return;
     }
 
+    if (data === 'refund:retry') {
+        await answerCallback(ctx);
+        await beginRefundRetryExecution(ctx);
+        return;
+    }
+
     if (data.startsWith('browse:mints:page:')) {
         await answerCallback(ctx);
         ctx.session.browseState.mintPage = Number.parseInt(data.split(':')[3], 10) || 0;
@@ -3316,6 +3550,12 @@ async function handleCallback(ctx) {
     if (data === 'browse:runs:retry') {
         await answerCallback(ctx);
         await beginMintRetryExecution(ctx);
+        return;
+    }
+
+    if (data === 'browse:runs:retryRefund') {
+        await answerCallback(ctx);
+        await beginRefundRetryExecution(ctx);
         return;
     }
 
@@ -3487,6 +3727,12 @@ async function handleCallback(ctx) {
     if (data === 'tokens:runs:retry') {
         await answerCallback(ctx);
         await beginCreatedTokenMintRetryExecution(ctx);
+        return;
+    }
+
+    if (data === 'tokens:runs:retryRefund') {
+        await answerCallback(ctx);
+        await beginCreatedTokenRefundRetryExecution(ctx);
         return;
     }
 

@@ -6,7 +6,8 @@
     "bot": "node bot.js",
     "mint": "node mint.js",
     "multimint": "node multimint.js",
-    "refund": "node refund.js"
+    "refund": "node refund.js",
+    "multirefund": "node multirefund.js"
   },
   "keywords": [],
   "author": "",
