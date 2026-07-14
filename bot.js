@@ -3063,8 +3063,11 @@ async function handleTokenPhotoInput(ctx) {
     }
 
     const largestPhoto = [...(ctx.message.photo || [])].sort((left, right) => (right.file_size || 0) - (left.file_size || 0))[0];
-    if (!largestPhoto) {
-        setError(ctx, 'No photo was found in that message.');
+    const documentFile = ctx.message.document;
+    const targetFile = largestPhoto || (documentFile && String(documentFile.mime_type || '').startsWith('image/') ? documentFile : null);
+
+    if (!targetFile) {
+        setError(ctx, 'No image photo or image document was found in that message.');
         await renderTokenCard(ctx);
         return;
     }
@@ -3074,33 +3077,36 @@ async function handleTokenPhotoInput(ctx) {
     await renderPanel(ctx, [
         formatBanner('Uploading Token Icon'),
         '',
-        'Uploading the token icon to Pinata now.'
+        'Uploading the token icon to Pinata now...'
     ].join('\n'), []);
 
-    try {
-        const fileLink = await ctx.telegram.getFileLink(largestPhoto.file_id);
-        const response = await fetch(fileLink.href);
-        if (!response.ok) {
-            throw new Error(`Telegram file download failed with status ${response.status}.`);
+    Promise.resolve().then(async () => {
+        try {
+            const fileLink = await ctx.telegram.getFileLink(targetFile.file_id);
+            const response = await fetch(fileLink.href);
+            if (!response.ok) {
+                throw new Error(`Telegram file download failed with status ${response.status}.`);
+            }
+
+            const arrayBuffer = await response.arrayBuffer();
+            const fileName = targetFile.file_name || `${(ctx.session.tokenDraft.tokenSymbol || 'token').toLowerCase()}-icon-${Date.now()}.jpg`;
+            const upload = await uploadTokenImageToPinata({
+                buffer: Buffer.from(arrayBuffer),
+                fileName,
+                contentType: response.headers.get('content-type') || targetFile.mime_type || 'image/jpeg'
+            });
+
+            ctx.session.tokenDraft.imageUri = upload.imageUri;
+            ctx.session.tokenDraft.imageFileName = upload.fileName;
+            ctx.session.editField = null;
+            ctx.session.busy = false;
+            await renderTokenCard(ctx);
+        } catch (error) {
+            ctx.session.busy = false;
+            setError(ctx, error.message);
+            await renderTokenCard(ctx);
         }
-
-        const arrayBuffer = await response.arrayBuffer();
-        const upload = await uploadTokenImageToPinata({
-            buffer: Buffer.from(arrayBuffer),
-            fileName: `${(ctx.session.tokenDraft.tokenSymbol || 'token').toLowerCase()}-icon-${Date.now()}.jpg`,
-            contentType: response.headers.get('content-type') || 'image/jpeg'
-        });
-
-        ctx.session.tokenDraft.imageUri = upload.imageUri;
-        ctx.session.tokenDraft.imageFileName = upload.fileName;
-        ctx.session.editField = null;
-        ctx.session.busy = false;
-        await renderTokenCard(ctx);
-    } catch (error) {
-        ctx.session.busy = false;
-        setError(ctx, error.message);
-        await renderTokenCard(ctx);
-    }
+    });
 }
 
 async function handleAdditionalMintTextInput(ctx, text) {
@@ -4227,6 +4233,18 @@ bot.on('photo', async ctx => {
     }
 
     await ctx.reply('Use the button panel to navigate. Send a photo only when the token icon field is in edit mode.');
+});
+
+bot.on('document', async ctx => {
+    if (ctx.session.busy) {
+        await ctx.reply('An operation is already running.');
+        return;
+    }
+
+    if (ctx.session.flow === 'tokenCreate' && ctx.session.editField === 'tokenImage') {
+        await handleTokenPhotoInput(ctx);
+        return;
+    }
 });
 
 bot.on('text', async ctx => {
