@@ -2193,65 +2193,67 @@ async function beginMintExecution(ctx) {
         25
     );
 
-    try {
-        const runRecord = await executeMintRun({
-            mintAddress: draft.mintAddress,
-            totalAmount: draft.totalAmount,
-            walletCount: draft.walletCount,
-            tokenName: draft.tokenName,
-            tokenSymbol: draft.tokenSymbol,
-            connectionOptions: {
-                cluster: draft.network,
-                rpcUrl: draft.rpcOverride || undefined
-            },
-            delayMs: draft.delayMs !== undefined && draft.delayMs !== null ? draft.delayMs : (config.defaultDelayMs || 1500),
-            onProgress: progressReporter
-        });
+    Promise.resolve().then(async () => {
+        try {
+            const runRecord = await executeMintRun({
+                mintAddress: draft.mintAddress,
+                totalAmount: draft.totalAmount,
+                walletCount: draft.walletCount,
+                tokenName: draft.tokenName,
+                tokenSymbol: draft.tokenSymbol,
+                connectionOptions: {
+                    cluster: draft.network,
+                    rpcUrl: draft.rpcOverride || undefined
+                },
+                delayMs: draft.delayMs !== undefined && draft.delayMs !== null ? draft.delayMs : (config.defaultDelayMs || 1500),
+                onProgress: progressReporter
+            });
 
-        ctx.session.busy = false;
-        await sendMonitorAlert(ctx, `SUCCESS: Batch Mint Completed (${runRecord.status})`, [
-            `Mint Address: ${runRecord.mintAddress}`,
-            `Run ID: ${runRecord.runId}`,
-            `Wallets Minted: ${runRecord.walletCount}`,
-            `Total Tokens: ${runRecord.totalAmount}`,
-            `Failures: ${runRecord.failures.length}`,
-            `Network: ${getNetworkLabel(draft.network)}`
-        ]);
-        await updateOperationProgress(ctx, {
-            kind: 'mint',
-            phase: 'completed',
-            current: runRecord.walletCount,
-            total: runRecord.walletCount,
-            latestWallet: runRecord.wallets[runRecord.wallets.length - 1] || null,
-            details: [
-                `Mint: ${runRecord.mintAddress}`,
-                `Run: ${runRecord.runId}`
-            ],
-            summary: `Result: ${runRecord.status} | Failures: ${runRecord.failures.length}`
-        });
-        await renderMainMenu(ctx, 'Mint completed. Back at the main menu.');
-    } catch (error) {
-        ctx.session.busy = false;
-        await sendMonitorAlert(ctx, 'FAILURE: Batch Mint Failed', [
-            `Mint Address: ${draft.mintAddress}`,
-            `Wallets Target: ${draft.walletCount}`,
-            `Network: ${getNetworkLabel(draft.network)}`,
-            `Error: ${error.message}`
-        ]);
-        await updateOperationProgress(ctx, {
-            kind: 'mint',
-            phase: 'failed',
-            current: 0,
-            total: Number(draft.walletCount),
-            details: [
-                `Mint: ${formatMintAddress(draft.mintAddress)}`,
+            ctx.session.busy = false;
+            await sendMonitorAlert(ctx, `SUCCESS: Batch Mint Completed (${runRecord.status})`, [
+                `Mint Address: ${runRecord.mintAddress}`,
+                `Run ID: ${runRecord.runId}`,
+                `Wallets Minted: ${runRecord.walletCount}`,
+                `Total Tokens: ${runRecord.totalAmount}`,
+                `Failures: ${runRecord.failures.length}`,
                 `Network: ${getNetworkLabel(draft.network)}`
-            ],
-            summary: 'Result: failed',
-            error: error.message
-        });
-        await renderMainMenu(ctx, 'Mint failed. Back at the main menu.');
-    }
+            ]);
+            await updateOperationProgress(ctx, {
+                kind: 'mint',
+                phase: 'completed',
+                current: runRecord.walletCount,
+                total: runRecord.walletCount,
+                latestWallet: runRecord.wallets[runRecord.wallets.length - 1] || null,
+                details: [
+                    `Mint: ${runRecord.mintAddress}`,
+                    `Run: ${runRecord.runId}`
+                ],
+                summary: `Result: ${runRecord.status} | Failures: ${runRecord.failures.length}`
+            });
+            await renderMainMenu(ctx, 'Mint completed. Back at the main menu.');
+        } catch (error) {
+            ctx.session.busy = false;
+            await sendMonitorAlert(ctx, 'FAILURE: Batch Mint Failed', [
+                `Mint Address: ${draft.mintAddress}`,
+                `Wallets Target: ${draft.walletCount}`,
+                `Network: ${getNetworkLabel(draft.network)}`,
+                `Error: ${error.message}`
+            ]);
+            await updateOperationProgress(ctx, {
+                kind: 'mint',
+                phase: 'failed',
+                current: 0,
+                total: Number(draft.walletCount),
+                details: [
+                    `Mint: ${formatMintAddress(draft.mintAddress)}`,
+                    `Network: ${getNetworkLabel(draft.network)}`
+                ],
+                summary: 'Result: failed',
+                error: error.message
+            });
+            await renderMainMenu(ctx, 'Mint failed. Back at the main menu.');
+        }
+    });
 }
 
 async function beginRefundExecution(ctx) {
@@ -2297,56 +2299,58 @@ async function beginRefundExecution(ctx) {
         25
     );
 
-    try {
-        const runRecord = await executeRefundRun({
-            mintAddress: selectedMint.mintAddress,
-            runId: selectedRun.runId,
-            delayMs: state.delayMs !== undefined && state.delayMs !== null ? state.delayMs : (selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500),
-            onProgress: progressReporter
-        });
+    Promise.resolve().then(async () => {
+        try {
+            const runRecord = await executeRefundRun({
+                mintAddress: selectedMint.mintAddress,
+                runId: selectedRun.runId,
+                delayMs: state.delayMs !== undefined && state.delayMs !== null ? state.delayMs : (selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500),
+                onProgress: progressReporter
+            });
 
-        ctx.session.busy = false;
-        await sendMonitorAlert(ctx, `SUCCESS: Multi-Refund Completed (${runRecord.status})`, [
-            `Mint Address: ${runRecord.mintAddress}`,
-            `Run ID: ${runRecord.runId}`,
-            `Wallets Swept: ${runRecord.walletCount}`,
-            `Total Tokens Reclaimed: ${runRecord.totalAmount}`,
-            `Failures: ${runRecord.failures.length}`
-        ]);
-        await updateOperationProgress(ctx, {
-            kind: 'refund',
-            phase: 'completed',
-            current: runRecord.walletCount,
-            total: runRecord.walletCount,
-            latestWallet: runRecord.wallets[runRecord.wallets.length - 1] || null,
-            details: [
-                `Mint: ${runRecord.mintAddress}`,
-                `Run: ${runRecord.runId}`
-            ],
-            summary: `Result: ${runRecord.status} | Failures: ${runRecord.failures.length}`
-        });
-        await renderMainMenu(ctx, 'Refund completed. Back at the main menu.');
-    } catch (error) {
-        ctx.session.busy = false;
-        await sendMonitorAlert(ctx, 'FAILURE: Multi-Refund Failed', [
-            `Mint Address: ${selectedMint?.mintAddress || 'N/A'}`,
-            `Run ID: ${selectedRun?.runId || 'N/A'}`,
-            `Error: ${error.message}`
-        ]);
-        await updateOperationProgress(ctx, {
-            kind: 'refund',
-            phase: 'failed',
-            current: 0,
-            total: selectedRun.walletCount,
-            details: [
-                `Mint: ${selectedMint.mintAddress}`,
-                `Run: ${selectedRun.runId}`
-            ],
-            summary: 'Result: failed',
-            error: error.message
-        });
-        await renderMainMenu(ctx, 'Refund failed. Back at the main menu.');
-    }
+            ctx.session.busy = false;
+            await sendMonitorAlert(ctx, `SUCCESS: Multi-Refund Completed (${runRecord.status})`, [
+                `Mint Address: ${runRecord.mintAddress}`,
+                `Run ID: ${runRecord.runId}`,
+                `Wallets Swept: ${runRecord.walletCount}`,
+                `Total Tokens Reclaimed: ${runRecord.totalAmount}`,
+                `Failures: ${runRecord.failures.length}`
+            ]);
+            await updateOperationProgress(ctx, {
+                kind: 'refund',
+                phase: 'completed',
+                current: runRecord.walletCount,
+                total: runRecord.walletCount,
+                latestWallet: runRecord.wallets[runRecord.wallets.length - 1] || null,
+                details: [
+                    `Mint: ${runRecord.mintAddress}`,
+                    `Run: ${runRecord.runId}`
+                ],
+                summary: `Result: ${runRecord.status} | Failures: ${runRecord.failures.length}`
+            });
+            await renderMainMenu(ctx, 'Refund completed. Back at the main menu.');
+        } catch (error) {
+            ctx.session.busy = false;
+            await sendMonitorAlert(ctx, 'FAILURE: Multi-Refund Failed', [
+                `Mint Address: ${selectedMint?.mintAddress || 'N/A'}`,
+                `Run ID: ${selectedRun?.runId || 'N/A'}`,
+                `Error: ${error.message}`
+            ]);
+            await updateOperationProgress(ctx, {
+                kind: 'refund',
+                phase: 'failed',
+                current: 0,
+                total: selectedRun.walletCount,
+                details: [
+                    `Mint: ${selectedMint.mintAddress}`,
+                    `Run: ${selectedRun.runId}`
+                ],
+                summary: 'Result: failed',
+                error: error.message
+            });
+            await renderMainMenu(ctx, 'Refund failed. Back at the main menu.');
+        }
+    });
 }
 
 async function beginRefundRetryExecution(ctx) {
@@ -2404,50 +2408,52 @@ async function beginRefundRetryExecution(ctx) {
         25
     );
 
-    try {
-        const runRecord = await retryRefundFailures({
-            mintAddress: selectedMint.mintAddress,
-            runId: selectedRun.runId,
-            connectionOptions: {
-                cluster: selectedRun.network,
-                rpcUrl: selectedRun.rpcUrl || undefined
-            },
-            delayMs: state.delayMs !== undefined && state.delayMs !== null ? state.delayMs : (selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500),
-            onProgress: progressReporter
-        });
-        const remainingRetryableCount = countRetryableRefundWallets(runRecord);
+    Promise.resolve().then(async () => {
+        try {
+            const runRecord = await retryRefundFailures({
+                mintAddress: selectedMint.mintAddress,
+                runId: selectedRun.runId,
+                connectionOptions: {
+                    cluster: selectedRun.network,
+                    rpcUrl: selectedRun.rpcUrl || undefined
+                },
+                delayMs: state.delayMs !== undefined && state.delayMs !== null ? state.delayMs : (selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500),
+                onProgress: progressReporter
+            });
+            const remainingRetryableCount = countRetryableRefundWallets(runRecord);
 
-        state.runs[state.selectedRunIndex] = runRecord;
-        ctx.session.busy = false;
-        await updateOperationProgress(ctx, {
-            kind: 'refund',
-            phase: 'completed',
-            current: retryableWalletCount,
-            total: retryableWalletCount,
-            latestWallet: runRecord.wallets[runRecord.wallets.length - 1] || null,
-            details: [
-                `Mint: ${runRecord.mintAddress}`,
-                `Run: ${runRecord.runId}`
-            ],
-            summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
-        });
-        await renderMainMenu(ctx, 'Refund retry completed. Back at the main menu.');
-    } catch (error) {
-        ctx.session.busy = false;
-        await updateOperationProgress(ctx, {
-            kind: 'refund',
-            phase: 'failed',
-            current: 0,
-            total: retryableWalletCount,
-            details: [
-                `Mint: ${selectedMint.mintAddress}`,
-                `Run: ${selectedRun.runId}`
-            ],
-            summary: 'Result: failed',
-            error: error.message
-        });
-        await renderMainMenu(ctx, 'Refund retry failed. Back at the main menu.');
-    }
+            state.runs[state.selectedRunIndex] = runRecord;
+            ctx.session.busy = false;
+            await updateOperationProgress(ctx, {
+                kind: 'refund',
+                phase: 'completed',
+                current: retryableWalletCount,
+                total: retryableWalletCount,
+                latestWallet: runRecord.wallets[runRecord.wallets.length - 1] || null,
+                details: [
+                    `Mint: ${runRecord.mintAddress}`,
+                    `Run: ${runRecord.runId}`
+                ],
+                summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
+            });
+            await renderMainMenu(ctx, 'Refund retry completed. Back at the main menu.');
+        } catch (error) {
+            ctx.session.busy = false;
+            await updateOperationProgress(ctx, {
+                kind: 'refund',
+                phase: 'failed',
+                current: 0,
+                total: retryableWalletCount,
+                details: [
+                    `Mint: ${selectedMint.mintAddress}`,
+                    `Run: ${selectedRun.runId}`
+                ],
+                summary: 'Result: failed',
+                error: error.message
+            });
+            await renderMainMenu(ctx, 'Refund retry failed. Back at the main menu.');
+        }
+    });
 }
 
 async function beginMintRetryExecution(ctx) {
@@ -2505,50 +2511,52 @@ async function beginMintRetryExecution(ctx) {
         25
     );
 
-    try {
-        const runRecord = await retryMintFailures({
-            mintAddress: selectedMint.mintAddress,
-            runId: selectedRun.runId,
-            connectionOptions: {
-                cluster: selectedRun.network,
-                rpcUrl: selectedRun.rpcUrl || undefined
-            },
-            delayMs: selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500,
-            onProgress: progressReporter
-        });
-        const remainingRetryableCount = countRetryableWallets(runRecord);
+    Promise.resolve().then(async () => {
+        try {
+            const runRecord = await retryMintFailures({
+                mintAddress: selectedMint.mintAddress,
+                runId: selectedRun.runId,
+                connectionOptions: {
+                    cluster: selectedRun.network,
+                    rpcUrl: selectedRun.rpcUrl || undefined
+                },
+                delayMs: selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500,
+                onProgress: progressReporter
+            });
+            const remainingRetryableCount = countRetryableWallets(runRecord);
 
-        state.runs[state.selectedRunIndex] = runRecord;
-        ctx.session.busy = false;
-        await updateOperationProgress(ctx, {
-            kind: 'mint',
-            phase: 'completed',
-            current: retryableWalletCount,
-            total: retryableWalletCount,
-            latestWallet: runRecord.wallets.find(wallet => wallet.publicKey === retryWallets.slice(-1)[0]?.publicKey) || null,
-            details: [
-                `Mint: ${runRecord.mintAddress}`,
-                `Run: ${runRecord.runId}`
-            ],
-            summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
-        });
-        await renderMainMenu(ctx, 'Retry completed. Back at the main menu.');
-    } catch (error) {
-        ctx.session.busy = false;
-        await updateOperationProgress(ctx, {
-            kind: 'mint',
-            phase: 'failed',
-            current: 0,
-            total: retryableWalletCount,
-            details: [
-                `Mint: ${selectedMint.mintAddress}`,
-                `Run: ${selectedRun.runId}`
-            ],
-            summary: 'Result: failed',
-            error: error.message
-        });
-        await renderMainMenu(ctx, 'Retry failed. Back at the main menu.');
-    }
+            state.runs[state.selectedRunIndex] = runRecord;
+            ctx.session.busy = false;
+            await updateOperationProgress(ctx, {
+                kind: 'mint',
+                phase: 'completed',
+                current: retryableWalletCount,
+                total: retryableWalletCount,
+                latestWallet: runRecord.wallets.find(wallet => wallet.publicKey === retryWallets.slice(-1)[0]?.publicKey) || null,
+                details: [
+                    `Mint: ${runRecord.mintAddress}`,
+                    `Run: ${runRecord.runId}`
+                ],
+                summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
+            });
+            await renderMainMenu(ctx, 'Retry completed. Back at the main menu.');
+        } catch (error) {
+            ctx.session.busy = false;
+            await updateOperationProgress(ctx, {
+                kind: 'mint',
+                phase: 'failed',
+                current: 0,
+                total: retryableWalletCount,
+                details: [
+                    `Mint: ${selectedMint.mintAddress}`,
+                    `Run: ${selectedRun.runId}`
+                ],
+                summary: 'Result: failed',
+                error: error.message
+            });
+            await renderMainMenu(ctx, 'Retry failed. Back at the main menu.');
+        }
+    });
 }
 
 async function startNewRunForCreatedToken(ctx, tokenRecord) {
@@ -2598,59 +2606,61 @@ async function beginTokenCreateExecution(ctx) {
         'Creating token and minting the initial amount into the bot wallet now.'
     ].join('\n'), []);
 
-    try {
-        if (!draft.imageUri) {
-            throw new Error('Token icon is required before creating a token.');
-        }
-
-        const metadataUpload = await uploadTokenMetadataToPinata({
-            tokenName: draft.tokenName,
-            tokenSymbol: draft.tokenSymbol,
-            imageUri: draft.imageUri,
-            description: draft.description,
-            twitter: draft.twitter
-        });
-        const metadataUri = metadataUpload.metadataUri;
-
-        const tokenRecord = await executeTokenCreate({
-            tokenName: draft.tokenName,
-            tokenSymbol: draft.tokenSymbol,
-            metadataUri,
-            imageUri: draft.imageUri,
-            decimals: draft.decimals,
-            initialMintAmount: draft.initialMintAmount,
-            connectionOptions: {
-                cluster: draft.network,
-                rpcUrl: draft.rpcOverride || undefined
+    Promise.resolve().then(async () => {
+        try {
+            if (!draft.imageUri) {
+                throw new Error('Token icon is required before creating a token.');
             }
-        });
 
-        ctx.session.busy = false;
-        await sendMonitorAlert(ctx, 'SUCCESS: Token Created', [
-            `Name: ${tokenRecord.tokenName} (${tokenRecord.tokenSymbol})`,
-            `Mint Address: ${tokenRecord.mintAddress}`,
-            `Decimals: ${tokenRecord.decimals}`,
-            `Initial Mint: ${tokenRecord.initialMintAmount}`,
-            `Network: ${getNetworkLabel(tokenRecord.network || draft.network)}`,
-            `Metadata URI: ${tokenRecord.metadataUri}`
-        ]);
-        await startCreatedTokensFlow(ctx, {
-            selectedMintAddress: tokenRecord.mintAddress,
-            introText: `Token created successfully. Minted ${tokenRecord.initialMintAmount} into the bot wallet.`
-        });
-    } catch (error) {
-        ctx.session.busy = false;
-        await sendMonitorAlert(ctx, 'FAILURE: Token Creation Failed', [
-            `Name: ${draft.tokenName} (${draft.tokenSymbol})`,
-            `Network: ${getNetworkLabel(draft.network)}`,
-            `Error: ${error.message}`
-        ]);
-        if (!ctx.session.tokenDraft) {
-            ctx.session.tokenDraft = draftSnapshot;
+            const metadataUpload = await uploadTokenMetadataToPinata({
+                tokenName: draft.tokenName,
+                tokenSymbol: draft.tokenSymbol,
+                imageUri: draft.imageUri,
+                description: draft.description,
+                twitter: draft.twitter
+            });
+            const metadataUri = metadataUpload.metadataUri;
+
+            const tokenRecord = await executeTokenCreate({
+                tokenName: draft.tokenName,
+                tokenSymbol: draft.tokenSymbol,
+                metadataUri,
+                imageUri: draft.imageUri,
+                decimals: draft.decimals,
+                initialMintAmount: draft.initialMintAmount,
+                connectionOptions: {
+                    cluster: draft.network,
+                    rpcUrl: draft.rpcOverride || undefined
+                }
+            });
+
+            ctx.session.busy = false;
+            await sendMonitorAlert(ctx, 'SUCCESS: Token Created', [
+                `Name: ${tokenRecord.tokenName} (${tokenRecord.tokenSymbol})`,
+                `Mint Address: ${tokenRecord.mintAddress}`,
+                `Decimals: ${tokenRecord.decimals}`,
+                `Initial Mint: ${tokenRecord.initialMintAmount}`,
+                `Network: ${getNetworkLabel(tokenRecord.network || draft.network)}`,
+                `Metadata URI: ${tokenRecord.metadataUri}`
+            ]);
+            await startCreatedTokensFlow(ctx, {
+                selectedMintAddress: tokenRecord.mintAddress,
+                introText: `Token created successfully. Minted ${tokenRecord.initialMintAmount} into the bot wallet.`
+            });
+        } catch (error) {
+            ctx.session.busy = false;
+            await sendMonitorAlert(ctx, 'FAILURE: Token Creation Failed', [
+                `Name: ${draft.tokenName} (${draft.tokenSymbol})`,
+                `Network: ${getNetworkLabel(draft.network)}`,
+                `Error: ${error.message}`
+            ]);
+            if (!ctx.session.tokenDraft) {
+                ctx.session.tokenDraft = draftSnapshot;
+            }
+            setError(ctx, error.message);
+            await renderTokenCard(ctx);
         }
-        setError(ctx, error.message);
-        await renderTokenCard(ctx);
-    }
+    });
 }
 
 async function beginAdditionalMintExecution(ctx) {
@@ -2678,26 +2688,28 @@ async function beginAdditionalMintExecution(ctx) {
         'Minting additional tokens into the bot wallet now.'
     ].join('\n'), []);
 
-    try {
-        const updatedToken = await executeAdditionalMint({
-            mintAddress: selectedToken.mintAddress,
-            amount,
-            connectionOptions: {
-                cluster: selectedToken.network,
-                rpcUrl: selectedToken.rpcUrl || undefined
-            }
-        });
+    Promise.resolve().then(async () => {
+        try {
+            const updatedToken = await executeAdditionalMint({
+                mintAddress: selectedToken.mintAddress,
+                amount,
+                connectionOptions: {
+                    cluster: selectedToken.network,
+                    rpcUrl: selectedToken.rpcUrl || undefined
+                }
+            });
 
-        state.tokens[state.selectedTokenIndex] = updatedToken;
-        state.additionalMintAmount = '';
-        ctx.session.busy = false;
-        ctx.session.editField = null;
-        await renderCreatedTokenDetail(ctx, `Additional mint completed. Minted ${amount} into the bot wallet.`);
-    } catch (error) {
-        ctx.session.busy = false;
-        setError(ctx, error.message);
-        await renderAdditionalMintCard(ctx);
-    }
+            state.tokens[state.selectedTokenIndex] = updatedToken;
+            state.additionalMintAmount = '';
+            ctx.session.busy = false;
+            ctx.session.editField = null;
+            await renderCreatedTokenDetail(ctx, `Additional mint completed. Minted ${amount} into the bot wallet.`);
+        } catch (error) {
+            ctx.session.busy = false;
+            setError(ctx, error.message);
+            await renderAdditionalMintCard(ctx);
+        }
+    });
 }
 
 async function beginAuthorityRevokeExecution(ctx, authorityKind) {
@@ -2717,26 +2729,28 @@ async function beginAuthorityRevokeExecution(ctx, authorityKind) {
         `Revoking ${authorityLabel.toLowerCase()} authority on-chain now.`
     ].join('\n'), []);
 
-    try {
-        const result = await executeRevokeAuthority({
-            mintAddress: selectedToken.mintAddress,
-            authorityKind,
-            connectionOptions: {
-                cluster: selectedToken.network,
-                rpcUrl: selectedToken.rpcUrl || undefined
-            }
-        });
+    Promise.resolve().then(async () => {
+        try {
+            const result = await executeRevokeAuthority({
+                mintAddress: selectedToken.mintAddress,
+                authorityKind,
+                connectionOptions: {
+                    cluster: selectedToken.network,
+                    rpcUrl: selectedToken.rpcUrl || undefined
+                }
+            });
 
-        ctx.session.busy = false;
-        await renderCreatedTokenDetail(
-            ctx,
-            `${authorityLabel} authority revoked. Signature: ${result.signature}`
-        );
-    } catch (error) {
-        ctx.session.busy = false;
-        setError(ctx, error.message);
-        await renderCreatedTokenDetail(ctx);
-    }
+            ctx.session.busy = false;
+            await renderCreatedTokenDetail(
+                ctx,
+                `${authorityLabel} authority revoked. Signature: ${result.signature}`
+            );
+        } catch (error) {
+            ctx.session.busy = false;
+            setError(ctx, error.message);
+            await renderCreatedTokenDetail(ctx);
+        }
+    });
 }
 
 async function beginCreatedTokenMintRetryExecution(ctx) {
@@ -2794,50 +2808,52 @@ async function beginCreatedTokenMintRetryExecution(ctx) {
         25
     );
 
-    try {
-        const runRecord = await retryMintFailures({
-            mintAddress: selectedToken.mintAddress,
-            runId: selectedRun.runId,
-            connectionOptions: {
-                cluster: selectedRun.network,
-                rpcUrl: selectedRun.rpcUrl || undefined
-            },
-            delayMs: selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500,
-            onProgress: progressReporter
-        });
-        const remainingRetryableCount = countRetryableWallets(runRecord);
+    Promise.resolve().then(async () => {
+        try {
+            const runRecord = await retryMintFailures({
+                mintAddress: selectedToken.mintAddress,
+                runId: selectedRun.runId,
+                connectionOptions: {
+                    cluster: selectedRun.network,
+                    rpcUrl: selectedRun.rpcUrl || undefined
+                },
+                delayMs: selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500,
+                onProgress: progressReporter
+            });
+            const remainingRetryableCount = countRetryableWallets(runRecord);
 
-        state.runs[state.selectedRunIndex] = runRecord;
-        ctx.session.busy = false;
-        await updateOperationProgress(ctx, {
-            kind: 'mint',
-            phase: 'completed',
-            current: retryableWalletCount,
-            total: retryableWalletCount,
-            latestWallet: runRecord.wallets.find(wallet => wallet.publicKey === retryWallets.slice(-1)[0]?.publicKey) || null,
-            details: [
-                `Mint: ${runRecord.mintAddress}`,
-                `Run: ${runRecord.runId}`
-            ],
-            summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
-        });
-        await renderMainMenu(ctx, 'Retry completed. Back at the main menu.');
-    } catch (error) {
-        ctx.session.busy = false;
-        await updateOperationProgress(ctx, {
-            kind: 'mint',
-            phase: 'failed',
-            current: 0,
-            total: retryableWalletCount,
-            details: [
-                `Mint: ${selectedToken.mintAddress}`,
-                `Run: ${selectedRun.runId}`
-            ],
-            summary: 'Result: failed',
-            error: error.message
-        });
-        await renderMainMenu(ctx, 'Retry failed. Back at the main menu.');
-    }
+            state.runs[state.selectedRunIndex] = runRecord;
+            ctx.session.busy = false;
+            await updateOperationProgress(ctx, {
+                kind: 'mint',
+                phase: 'completed',
+                current: retryableWalletCount,
+                total: retryableWalletCount,
+                latestWallet: runRecord.wallets.find(wallet => wallet.publicKey === retryWallets.slice(-1)[0]?.publicKey) || null,
+                details: [
+                    `Mint: ${runRecord.mintAddress}`,
+                    `Run: ${runRecord.runId}`
+                ],
+                summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
+            });
+            await renderMainMenu(ctx, 'Retry completed. Back at the main menu.');
+        } catch (error) {
+            ctx.session.busy = false;
+            await updateOperationProgress(ctx, {
+                kind: 'mint',
+                phase: 'failed',
+                current: 0,
+                total: retryableWalletCount,
+                details: [
+                    `Mint: ${selectedToken.mintAddress}`,
+                    `Run: ${selectedRun.runId}`
+                ],
+                summary: 'Result: failed',
+                error: error.message
+            });
+            await renderMainMenu(ctx, 'Retry failed. Back at the main menu.');
+        }
+    });
 }
 
 async function beginCreatedTokenRefundRetryExecution(ctx) {
@@ -2891,50 +2907,52 @@ async function beginCreatedTokenRefundRetryExecution(ctx) {
         25
     );
 
-    try {
-        const runRecord = await retryRefundFailures({
-            mintAddress: selectedToken.mintAddress,
-            runId: selectedRun.runId,
-            connectionOptions: {
-                cluster: selectedRun.network,
-                rpcUrl: selectedRun.rpcUrl || undefined
-            },
-            delayMs: state.delayMs !== undefined && state.delayMs !== null ? state.delayMs : (selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500),
-            onProgress: progressReporter
-        });
-        const remainingRetryableCount = countRetryableRefundWallets(runRecord);
+    Promise.resolve().then(async () => {
+        try {
+            const runRecord = await retryRefundFailures({
+                mintAddress: selectedToken.mintAddress,
+                runId: selectedRun.runId,
+                connectionOptions: {
+                    cluster: selectedRun.network,
+                    rpcUrl: selectedRun.rpcUrl || undefined
+                },
+                delayMs: state.delayMs !== undefined && state.delayMs !== null ? state.delayMs : (selectedRun.delayMs !== undefined && selectedRun.delayMs !== null ? selectedRun.delayMs : 1500),
+                onProgress: progressReporter
+            });
+            const remainingRetryableCount = countRetryableRefundWallets(runRecord);
 
-        state.runs[state.selectedRunIndex] = runRecord;
-        ctx.session.busy = false;
-        await updateOperationProgress(ctx, {
-            kind: 'refund',
-            phase: 'completed',
-            current: retryableWalletCount,
-            total: retryableWalletCount,
-            latestWallet: runRecord.wallets[runRecord.wallets.length - 1] || null,
-            details: [
-                `Mint: ${runRecord.mintAddress}`,
-                `Run: ${runRecord.runId}`
-            ],
-            summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
-        });
-        await renderMainMenu(ctx, 'Refund retry completed. Back at the main menu.');
-    } catch (error) {
-        ctx.session.busy = false;
-        await updateOperationProgress(ctx, {
-            kind: 'refund',
-            phase: 'failed',
-            current: 0,
-            total: retryableWalletCount,
-            details: [
-                `Mint: ${selectedToken.mintAddress}`,
-                `Run: ${selectedRun.runId}`
-            ],
-            summary: 'Result: failed',
-            error: error.message
-        });
-        await renderMainMenu(ctx, 'Refund retry failed. Back at the main menu.');
-    }
+            state.runs[state.selectedRunIndex] = runRecord;
+            ctx.session.busy = false;
+            await updateOperationProgress(ctx, {
+                kind: 'refund',
+                phase: 'completed',
+                current: retryableWalletCount,
+                total: retryableWalletCount,
+                latestWallet: runRecord.wallets[runRecord.wallets.length - 1] || null,
+                details: [
+                    `Mint: ${runRecord.mintAddress}`,
+                    `Run: ${runRecord.runId}`
+                ],
+                summary: `Result: ${runRecord.status} | Remaining Failed: ${remainingRetryableCount}`
+            });
+            await renderMainMenu(ctx, 'Refund retry completed. Back at the main menu.');
+        } catch (error) {
+            ctx.session.busy = false;
+            await updateOperationProgress(ctx, {
+                kind: 'refund',
+                phase: 'failed',
+                current: 0,
+                total: retryableWalletCount,
+                details: [
+                    `Mint: ${selectedToken.mintAddress}`,
+                    `Run: ${selectedRun.runId}`
+                ],
+                summary: 'Result: failed',
+                error: error.message
+            });
+            await renderMainMenu(ctx, 'Refund retry failed. Back at the main menu.');
+        }
+    });
 }
 
 async function handleMintTextInput(ctx, text) {
@@ -3149,55 +3167,57 @@ async function beginPoolCreateExecution(ctx) {
         'Creating the DAMM v2 pool and initial LP position on-chain now.'
     ].join('\n'), []);
 
-    try {
-        const poolRecord = await createDammPool({
-            network: draft.network,
-            tokenMintAddress: draft.tokenMintAddress,
-            solAmount: draft.solAmount,
-            tokenAmount: draft.tokenAmount
-        });
+    Promise.resolve().then(async () => {
+        try {
+            const poolRecord = await createDammPool({
+                network: draft.network,
+                tokenMintAddress: draft.tokenMintAddress,
+                solAmount: draft.solAmount,
+                tokenAmount: draft.tokenAmount
+            });
 
-        ctx.session.busy = false;
-        await sendMonitorAlert(ctx, 'SUCCESS: DAMM Pool Created', [
-            `Network: ${getNetworkLabel(poolRecord.network)}`,
-            `Token Mint: ${poolRecord.baseMint}`,
-            `Pool Address: ${poolRecord.poolAddress}`,
-            `SOL Amount: ${poolRecord.solAmount}`,
-            `Token Amount: ${poolRecord.tokenAmount}`,
-            `Create Signature: ${poolRecord.createSignature}`,
-            `Meteora URL: ${poolRecord.meteoraUrl || `https://app.meteora.ag/pools/${poolRecord.poolAddress}`}`
-        ]);
-        resetSession(ctx, { preservePanel: true });
-        await renderPanel(ctx, [
-            formatBanner('DAMM Pool Created'),
-            '',
-            `🌐 Network: ${getNetworkLabel(poolRecord.network)}`,
-            `🪙 Token: ${getTokenDisplay(poolRecord) || poolRecord.baseMint}`,
-            `🏊 Pool Address: ${poolRecord.poolAddress}`,
-            `🧾 Token Mint: ${poolRecord.baseMint}`,
-            `◎ SOL Amount: ${poolRecord.solAmount}`,
-            `🪙 Token Amount: ${poolRecord.tokenAmount}`,
-            `⚙️ Config: ${poolRecord.configAddress}`,
-            `🧮 Fee Mode: ${poolRecord.collectFeeModeLabel || poolRecord.collectFeeMode}`,
-            `✍️ Create Signature: ${poolRecord.createSignature}`,
-            `📍 Position Address: ${poolRecord.positionAddress}`,
-            `🎫 Position NFT Mint: ${poolRecord.positionNftMint || 'N/A'}`,
-            `🔗 Meteora URL: ${poolRecord.meteoraUrl || `https://app.meteora.ag/pools/${poolRecord.poolAddress}`}`
-        ].join('\n'), [
-            [Markup.button.callback('🏠 Main Menu', 'menu:main')]
-        ]);
-    } catch (error) {
-        ctx.session.busy = false;
-        await sendMonitorAlert(ctx, 'FAILURE: DAMM Pool Creation Failed', [
-            `Network: ${getNetworkLabel(draft.network)}`,
-            `Token Mint: ${draft.tokenMintAddress}`,
-            `SOL Amount: ${draft.solAmount}`,
-            `Token Amount: ${draft.tokenAmount}`,
-            `Error: ${error.message}`
-        ]);
-        setError(ctx, error.message);
-        await renderPoolCard(ctx);
-    }
+            ctx.session.busy = false;
+            await sendMonitorAlert(ctx, 'SUCCESS: DAMM Pool Created', [
+                `Network: ${getNetworkLabel(poolRecord.network)}`,
+                `Token Mint: ${poolRecord.baseMint}`,
+                `Pool Address: ${poolRecord.poolAddress}`,
+                `SOL Amount: ${poolRecord.solAmount}`,
+                `Token Amount: ${poolRecord.tokenAmount}`,
+                `Create Signature: ${poolRecord.createSignature}`,
+                `Meteora URL: ${poolRecord.meteoraUrl || `https://app.meteora.ag/pools/${poolRecord.poolAddress}`}`
+            ]);
+            resetSession(ctx, { preservePanel: true });
+            await renderPanel(ctx, [
+                formatBanner('DAMM Pool Created'),
+                '',
+                `🌐 Network: ${getNetworkLabel(poolRecord.network)}`,
+                `🪙 Token: ${getTokenDisplay(poolRecord) || poolRecord.baseMint}`,
+                `🏊 Pool Address: ${poolRecord.poolAddress}`,
+                `🧾 Token Mint: ${poolRecord.baseMint}`,
+                `◎ SOL Amount: ${poolRecord.solAmount}`,
+                `🪙 Token Amount: ${poolRecord.tokenAmount}`,
+                `⚙️ Config: ${poolRecord.configAddress}`,
+                `🧮 Fee Mode: ${poolRecord.collectFeeModeLabel || poolRecord.collectFeeMode}`,
+                `✍️ Create Signature: ${poolRecord.createSignature}`,
+                `📍 Position Address: ${poolRecord.positionAddress}`,
+                `🎫 Position NFT Mint: ${poolRecord.positionNftMint || 'N/A'}`,
+                `🔗 Meteora URL: ${poolRecord.meteoraUrl || `https://app.meteora.ag/pools/${poolRecord.poolAddress}`}`
+            ].join('\n'), [
+                [Markup.button.callback('🏠 Main Menu', 'menu:main')]
+            ]);
+        } catch (error) {
+            ctx.session.busy = false;
+            await sendMonitorAlert(ctx, 'FAILURE: DAMM Pool Creation Failed', [
+                `Network: ${getNetworkLabel(draft.network)}`,
+                `Token Mint: ${draft.tokenMintAddress}`,
+                `SOL Amount: ${draft.solAmount}`,
+                `Token Amount: ${draft.tokenAmount}`,
+                `Error: ${error.message}`
+            ]);
+            setError(ctx, error.message);
+            await renderPoolCard(ctx);
+        }
+    });
 }
 
 async function handleMenuAction(ctx, action) {
@@ -3296,6 +3316,42 @@ async function handleCallback(ctx) {
         ctx.session.flow = 'wallet';
         ctx.session.editField = 'privateKey';
         await ctx.reply('Send the new base58 private key or JSON byte array (`[12, 34, ...]\`) in chat right now. Your message will be automatically deleted as soon as the bot reads it for your safety.');
+        return;
+    }
+
+    if (data.startsWith('tokens:') && (!ctx.session.createdTokenState || !Array.isArray(ctx.session.createdTokenState.tokens))) {
+        await answerCallback(ctx, 'Reloading created tokens...');
+        await startCreatedTokensFlow(ctx);
+        return;
+    }
+
+    if (data.startsWith('browse:') && (!ctx.session.browseState || !Array.isArray(ctx.session.browseState.mints))) {
+        await answerCallback(ctx, 'Reloading browse menu...');
+        await startBrowseTokensFlow(ctx);
+        return;
+    }
+
+    if (data.startsWith('pool:') && !data.startsWith('pool:network:') && !ctx.session.poolState) {
+        await answerCallback(ctx, 'Reloading pool menu...');
+        await startPoolCreateFlow(ctx);
+        return;
+    }
+
+    if (data.startsWith('refund:') && (!ctx.session.refundState || !Array.isArray(ctx.session.refundState.mints))) {
+        await answerCallback(ctx, 'Reloading refund menu...');
+        await startRefundFlow(ctx);
+        return;
+    }
+
+    if (data.startsWith('token:') && !ctx.session.tokenDraft) {
+        await answerCallback(ctx, 'Reloading token creation menu...');
+        await startTokenCreateFlow(ctx);
+        return;
+    }
+
+    if (data.startsWith('mint:') && !ctx.session.mintDraft) {
+        await answerCallback(ctx, 'Reloading menu...');
+        await startTokenCreateFlow(ctx);
         return;
     }
 
@@ -3809,12 +3865,22 @@ async function handleCallback(ctx) {
 
     if (data === 'tokens:newrun') {
         await answerCallback(ctx);
-        await startNewRunForCreatedToken(ctx, ctx.session.createdTokenState.tokens[ctx.session.createdTokenState.selectedTokenIndex]);
+        const token = ctx.session.createdTokenState?.tokens?.[ctx.session.createdTokenState?.selectedTokenIndex];
+        if (!token) {
+            await startCreatedTokensFlow(ctx);
+            return;
+        }
+        await startNewRunForCreatedToken(ctx, token);
         return;
     }
 
     if (data === 'tokens:additionalmint') {
         await answerCallback(ctx);
+        const token = ctx.session.createdTokenState?.tokens?.[ctx.session.createdTokenState?.selectedTokenIndex];
+        if (!token || !ctx.session.createdTokenState) {
+            await startCreatedTokensFlow(ctx);
+            return;
+        }
         ctx.session.flow = 'tokenAdditionalMint';
         ctx.session.view = 'additionalMint';
         ctx.session.editField = null;
@@ -4202,6 +4268,11 @@ bot.on('text', async ctx => {
 
     if (ctx.session.flow === 'refund') {
         await handleRefundTextInput(ctx, ctx.message.text);
+        return;
+    }
+
+    if (ctx.session.flow === 'wallet') {
+        await handleWalletTextInput(ctx, ctx.message.text);
         return;
     }
 
